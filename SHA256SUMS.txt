@@ -1,0 +1,3 @@
+f9bacc612aeff4e601c2910b8984c8685069919ec3aaf4950b7d80183d780203  Palworld Server Operations - Admin.exe
+249ea7685c98903606ea8813bc1eb5e0ac7ca6d32f1780fea2a49deb6536a647  Palworld Server Operations - Client.exe
+8351f8685ec74f58b6cbea5ed4b112ed46f9aaf5cfd18071bf59f2f5844ee678  PalworldServerInstaller.run
