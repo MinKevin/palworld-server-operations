@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "오류: python3가 필요합니다. 먼저 sudo bash install/setup.sh를 실행하세요." >&2
+    exit 1
+fi
+
+assert_palworld_host_project_owner
+acquire_palworld_project_operation_lock
+cd "$PALWORLD_PROJECT_DIR"
+exec python3 -B "$PALWORLD_INSTALL_DIR/scripts/doctor.py" "$@"

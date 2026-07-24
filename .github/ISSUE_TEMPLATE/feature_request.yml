@@ -1,0 +1,35 @@
+name: Feature request
+description: Propose a focused improvement to the supported administration workflow.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the operator problem, not only the preferred implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: risk
+    attributes:
+      label: Security, compatibility, and game-server impact
+      description: Include credential, network, backup, resource-use, and upgrade considerations.
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I checked existing issues and documentation for the same request.
+          required: true
+        - label: The proposal does not require publishing secrets or proprietary game assets.
+          required: true

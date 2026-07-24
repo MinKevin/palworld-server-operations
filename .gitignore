@@ -1,0 +1,37 @@
+# Generated host state (Setup recreates it from tracked source files)
+/data/
+/runtime/
+/backups/
+
+# Per-server configuration contains passwords and API tokens.
+/config/server[0-9]*.env
+
+# Local Windows Admin connection stores and crash-left temporary copies contain
+# encrypted credentials. Ignore them regardless of the portable EXE directory.
+*.connections*
+/windows/*.building
+/windows/*.zip
+/windows/Palworld ServerAdmin.exe
+
+# Local release staging. Publish distributable archives as GitHub Release assets.
+/dist/
+
+# Private/internal documents are not part of the public source snapshot.
+/docs/
+/for-clients/
+/START_HERE.txt
+/CHANGELOG.md
+
+# Common private-key formats. Test fixtures must generate temporary keys.
+*.pem
+*.ppk
+id_rsa
+id_ed25519
+
+# Distribution EXEs, the Linux .run file, generated SSH payloads, pinned vendor
+# DLLs, and sanitized templates are intentionally committed so a clone can be
+# built and inspected without reconstructing private deployment state.
+
+# Python caches
+__pycache__/
+*.pyc

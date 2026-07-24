@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+server="${1:-server1}"
+if [[ ! "$server" =~ ^server[1-9][0-9]*$ ]]; then
+    echo "오류: 첫 번째 값은 serverN 형식이어야 합니다. 예: server1" >&2
+    exit 2
+fi
+
+if (( $# > 0 )); then
+    shift
+fi
+if (( $# == 0 )); then
+    set -- status
+fi
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+project_dir="$(cd -- "$script_dir/.." && pwd -P)"
+registry_dir="/var/lib/palworld-server-operations"
+registry_file="$registry_dir/project-dir"
+host_lock="$registry_dir/operation.lock"
+container="palworld-$server"
+verified_container_id=""
+
+verify_project_and_container() {
+    if [[ -L "$registry_dir" || -L "$registry_file" || ! -f "$registry_file" ]]; then
+        echo "오류: 이 Docker 호스트의 관리 프로젝트 등록을 확인할 수 없습니다. Setup을 먼저 실행하세요." >&2
+        return 1
+    fi
+    local registered="" actual_container="" project_owner="" compose_owner="" instance_label="" owner=""
+    if [[ "$(stat -c '%u' -- "$registry_dir")" != 0 \
+        || "$(stat -c '%u' -- "$registry_file")" != 0 ]]; then
+        echo "오류: Docker 호스트 관리 프로젝트 등록은 root 소유여야 합니다." >&2
+        return 1
+    fi
+    IFS= read -r registered <"$registry_file" || true
+    if [[ -z "$registered" || "$registered" != "$project_dir" || "$(wc -l <"$registry_file")" -ne 1 ]]; then
+        echo "오류: 현재 디렉터리는 이 Docker 호스트에 등록된 관리 프로젝트가 아닙니다." >&2
+        echo "등록 프로젝트: ${registered:-없음}" >&2
+        echo "현재 프로젝트: $project_dir" >&2
+        return 1
+    fi
+    if ! verified_container_id="$(docker container inspect --format '{{.Id}}' "$container" 2>/dev/null)"; then
+        echo "오류: 관리 컨테이너를 찾을 수 없습니다: $container" >&2
+        return 1
+    fi
+    [[ "$verified_container_id" =~ ^[a-f0-9]{12,64}$ ]] || {
+        echo "오류: 관리 컨테이너의 immutable ID를 확인할 수 없습니다: $container" >&2
+        return 1
+    }
+    if ! actual_container="$(docker container inspect --format '{{.Name}}' "$verified_container_id" 2>&1)"; then
+        echo "오류: immutable ID로 컨테이너 이름을 다시 확인하지 못했습니다: $verified_container_id: $actual_container" >&2
+        return 1
+    fi
+    [[ "$actual_container" == "/$container" ]] || {
+        echo "오류: Docker가 예상과 다른 컨테이너를 반환했습니다: $actual_container" >&2
+        return 1
+    }
+    if ! project_owner="$(docker container inspect --format '{{index .Config.Labels "io.palworld.project-dir"}}' "$verified_container_id" 2>&1)" \
+        || ! compose_owner="$(docker container inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$verified_container_id" 2>&1)" \
+        || ! instance_label="$(docker container inspect --format '{{index .Config.Labels "io.palworld.instance"}}' "$verified_container_id" 2>&1)"; then
+        echo "오류: 관리 컨테이너의 소유 label을 확인하지 못했습니다: $container" >&2
+        return 1
+    fi
+    for owner in "$project_owner" "$compose_owner"; do
+        if [[ -n "$owner" && "$owner" != "<no value>" && "$owner" != "$project_dir" ]]; then
+            echo "오류: 다른 프로젝트 소유 컨테이너에는 명령을 실행하지 않습니다: $container ($owner)" >&2
+            return 1
+        fi
+    done
+    if [[ ( -z "$project_owner" || "$project_owner" == "<no value>" ) \
+        && ( -z "$compose_owner" || "$compose_owner" == "<no value>" ) ]]; then
+        echo "오류: project/Compose 소유 label이 없는 컨테이너에는 명령을 실행하지 않습니다: $container" >&2
+        return 1
+    fi
+    if [[ -n "$instance_label" && "$instance_label" != "<no value>" && "$instance_label" != "$server" ]]; then
+        echo "오류: 컨테이너 instance label이 대상 서버와 다릅니다: $instance_label" >&2
+        return 1
+    fi
+}
+
+# Read-only commands may run alongside diagnostics. Every state-changing
+# command shares the same host and project locks as Setup/Manage.
+case "${1:-status}" in
+    status|info|settings|players|metrics|health)
+        verify_project_and_container
+        ;;
+    *)
+        command -v flock >/dev/null 2>&1 || {
+            echo "오류: 관리 작업 잠금에 필요한 flock 명령을 찾을 수 없습니다." >&2
+            exit 1
+        }
+        if [[ -L "$host_lock" || ! -f "$host_lock" ]]; then
+            echo "오류: 호스트 관리 작업 잠금이 준비되지 않았습니다. Setup 또는 Manage를 먼저 실행하세요." >&2
+            exit 1
+        fi
+        exec 8>>"$host_lock"
+        flock -n 8 || {
+            echo "오류: 다른 Setup/Manage 작업이 진행 중입니다. 완료 후 다시 실행하세요." >&2
+            exit 1
+        }
+        # Registry and Docker ownership must be checked after the host lock is
+        # acquired; a Remove/claim transition may have happened while waiting.
+        verify_project_and_container
+        project_lock="$project_dir/runtime/project-operation.lock"
+        if [[ -L "$project_dir/runtime" || ! -d "$project_dir/runtime" \
+            || -L "$project_lock" || ( -e "$project_lock" && ! -f "$project_lock" ) ]]; then
+            echo "오류: 프로젝트 관리 작업 잠금 경로가 안전하지 않습니다: $project_lock" >&2
+            exit 1
+        fi
+        ( umask 0007; : >>"$project_lock" )
+        exec 9>>"$project_lock"
+        flock -n 9 || {
+            echo "오류: 다른 Setup/Manage 작업이 진행 중입니다. 완료 후 다시 실행하세요." >&2
+            exit 1
+        }
+        ;;
+esac
+exec docker exec "$verified_container_id" palctl "$@"

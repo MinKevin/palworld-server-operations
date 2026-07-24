@@ -1,0 +1,184 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-shell-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Check Linux shell syntax
+        shell: bash
+        run: |
+          bash -n \
+            install/lib.sh \
+            install/manager \
+            install/scaffold.sh \
+            install/setup.sh \
+            install/test \
+            operate/pal
+
+  test-and-build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run Python regression tests
+        shell: pwsh
+        run: |
+          $env:PYTHONDONTWRITEBYTECODE = "1"
+          python -B -m unittest discover -s tests -v
+
+      - name: Run bilingual Windows UI self-checks
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($edition in @("user", "admin")) {
+            foreach ($language in @("en", "ko")) {
+              $env:PALWORLD_CLIENT_EDITION = $edition
+              $env:PALWORLD_CLIENT_LANGUAGE = $language
+              $env:PALWORLD_CLIENT_TEST_MODE = "1"
+              $env:PALWORLD_CLIENT_TEST_SETTINGS_DIR = Join-Path $env:RUNNER_TEMP "$edition-$language"
+              powershell -NoLogo -NoProfile -ExecutionPolicy Bypass `
+                -File tools/windows-client/palworld-rest-client.ps1
+              if ($LASTEXITCODE -ne 0) {
+                throw "UI self-check failed: $edition/$language"
+              }
+            }
+          }
+
+      - name: Run Windows UI regression modes
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $scriptPath = (Resolve-Path "tools/windows-client/palworld-rest-client.ps1").Path
+          $privateKeyPath = Join-Path $env:RUNNER_TEMP "palworld-ci-private-key"
+          ssh-keygen -q -t rsa -b 2048 -m PEM -N "test-passphrase" -f $privateKeyPath
+          if ($LASTEXITCODE -ne 0) { throw "Could not create the temporary SSH test key" }
+
+          $env:PALWORLD_SSH_PRIVATE_KEY_TEST_PATH = $privateKeyPath
+          $env:PALWORLD_SSH_PRIVATE_KEY_TEST_PASSPHRASE = "test-passphrase"
+          $userModes = @("settings", "api-uri")
+          $adminModes = @(
+            "admin-empty", "admin-connection", "ssh-model", "ssh-runtime",
+            "ssh-close", "ssh-ui", "ssh-dialog", "ssh-dialog-events",
+            "ssh-private-key-dialog", "ssh-add", "ssh-logic", "connection-sync",
+            "crypto", "restore", "restore-close", "logs"
+          )
+
+          try {
+            foreach ($language in @("en", "ko")) {
+              foreach ($mode in $userModes) {
+                $env:PALWORLD_CLIENT_EDITION = "user"
+                $env:PALWORLD_CLIENT_LANGUAGE = $language
+                $env:PALWORLD_CLIENT_TEST_MODE = $mode
+                $env:PALWORLD_CLIENT_TEST_SETTINGS_DIR = Join-Path $env:RUNNER_TEMP "user-$language-$mode"
+                powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath
+                if ($LASTEXITCODE -ne 0) { throw "UI regression failed: user/$language/$mode" }
+              }
+
+              foreach ($mode in $adminModes) {
+                $env:PALWORLD_CLIENT_EDITION = "admin"
+                $env:PALWORLD_CLIENT_LANGUAGE = $language
+                $env:PALWORLD_CLIENT_TEST_MODE = $mode
+                $env:PALWORLD_CLIENT_TEST_SETTINGS_DIR = Join-Path $env:RUNNER_TEMP "admin-$language-$mode"
+                Remove-Item Env:PALWORLD_CLIENT_TEST_CHANNEL -ErrorAction SilentlyContinue
+                powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath
+                if ($LASTEXITCODE -ne 0) { throw "UI regression failed: admin/$language/$mode" }
+              }
+
+              $env:PALWORLD_CLIENT_EDITION = "admin"
+              $env:PALWORLD_CLIENT_LANGUAGE = $language
+              $env:PALWORLD_CLIENT_TEST_MODE = "ssh-ui"
+              $env:PALWORLD_CLIENT_TEST_CHANNEL = "Terminal"
+              $env:PALWORLD_CLIENT_TEST_SETTINGS_DIR = Join-Path $env:RUNNER_TEMP "admin-$language-terminal"
+              powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath
+              if ($LASTEXITCODE -ne 0) { throw "UI regression failed: admin/$language/ssh-ui-terminal" }
+            }
+          }
+          finally {
+            Remove-Item Env:PALWORLD_CLIENT_TEST_CHANNEL -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $privateKeyPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath "$privateKeyPath.pub" -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Rebuild deterministic Linux and SSH payloads
+        shell: pwsh
+        run: |
+          python -B tools/build_ssh_payloads.py
+          python -B tools/build_linux_installer.py
+          git diff --exit-code -- PalworldServerInstaller.run tools/windows-ssh-manager/generated
+
+      - name: Verify committed Windows executables match current build inputs
+        shell: powershell
+        run: |
+          powershell -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File tools/windows-client/verify-exe-build-inputs.ps1 `
+            -Edition User `
+            -ExePath "windows/Palworld Server Operations - Client.exe"
+          powershell -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File tools/windows-client/verify-exe-build-inputs.ps1 `
+            -Edition Admin `
+            -ExePath "windows/Palworld Server Operations - Admin.exe"
+
+      - name: Build portable Windows executables
+        shell: powershell
+        run: |
+          $userExe = Join-Path $env:RUNNER_TEMP "Palworld Server Operations - Client.exe"
+          $adminExe = Join-Path $env:RUNNER_TEMP "Palworld Server Operations - Admin.exe"
+          powershell -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File tools/windows-client/build-exe.ps1 -Edition User -OutputPath $userExe
+          powershell -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File tools/windows-client/build-exe.ps1 -Edition Admin -OutputPath $adminExe
+          $userProcess = Start-Process -FilePath $userExe `
+            -ArgumentList @("--test-mode", "launcher-smoke") `
+            -WindowStyle Hidden -Wait -PassThru
+          if ($userProcess.ExitCode -ne 0) { throw "User launcher smoke test failed" }
+
+          $adminProcess = Start-Process -FilePath $adminExe `
+            -ArgumentList @("--test-mode", "launcher-smoke") `
+            -WindowStyle Hidden -Wait -PassThru
+          if ($adminProcess.ExitCode -ne 0) { throw "Admin launcher smoke test failed" }
+
+          foreach ($entry in @(
+            @{ Name = "User"; Path = $userExe },
+            @{ Name = "Admin"; Path = $adminExe }
+          )) {
+            $env:PALWORLD_CLIENT_TEST_MODE = "1"
+            $env:PALWORLD_CLIENT_LANGUAGE = "en"
+            $env:PALWORLD_CLIENT_TEST_SETTINGS_DIR = Join-Path `
+              $env:RUNNER_TEMP "$($entry.Name)-packaged-self-check"
+            $env:PALWORLD_LAUNCHER_TEST_ERROR_FILE = Join-Path `
+              $env:RUNNER_TEMP "$($entry.Name)-launcher-error.txt"
+            $process = Start-Process -FilePath $entry.Path `
+              -WindowStyle Hidden -Wait -PassThru
+            if ($process.ExitCode -ne 0) {
+              $detail = if (Test-Path $env:PALWORLD_LAUNCHER_TEST_ERROR_FILE) {
+                Get-Content -Raw $env:PALWORLD_LAUNCHER_TEST_ERROR_FILE
+              } else { "No launcher diagnostic was written." }
+              throw "$($entry.Name) packaged self-check failed: $detail"
+            }
+          }
+          Remove-Item Env:PALWORLD_CLIENT_TEST_MODE -ErrorAction SilentlyContinue
+          Remove-Item Env:PALWORLD_LAUNCHER_TEST_ERROR_FILE -ErrorAction SilentlyContinue

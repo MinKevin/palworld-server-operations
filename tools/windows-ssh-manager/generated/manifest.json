@@ -1,0 +1,296 @@
+{
+  "version": 2,
+  "payloads": {
+    "setup": {
+      "file": "setup.tar.gz",
+      "size": 143893,
+      "sha256": "0923abcdaa2e2f309a4b6f97435a6516d1de3a88e097d3653253335a2b9f1e28",
+      "entries": [
+        "install/Dockerfile",
+        "install/lib.sh",
+        "install/manager",
+        "install/scaffold.sh",
+        "install/scripts/common.py",
+        "install/scripts/doctor.py",
+        "install/scripts/import_existing.py",
+        "install/scripts/instances.py",
+        "install/scripts/management_api.py",
+        "install/scripts/manager.py",
+        "install/scripts/palctl.py",
+        "install/scripts/policy.py",
+        "install/scripts/reset_world.py",
+        "install/scripts/resource_metrics.py",
+        "install/scripts/restore_world.py",
+        "install/scripts/world_backup.py",
+        "install/setup.sh",
+        "install/test",
+        "scaffold/LICENSE",
+        "scaffold/operate/pal",
+        "scaffold/config/kr/common.env",
+        "scaffold/config/kr/server.template.env",
+        "scaffold/config/en/common.env",
+        "scaffold/config/en/server.template.env"
+      ],
+      "sources": [
+        {
+          "entry": "install/Dockerfile",
+          "path": "install/Dockerfile",
+          "sha256": "fd49878bd105701ee6ce055c2e665dd61cdf4d6db28ba4574a38aa7ebaaeb0d0"
+        },
+        {
+          "entry": "install/lib.sh",
+          "path": "install/lib.sh",
+          "sha256": "1283c45df45f87ae693ca96d106237ed1542c9742485c9f146b68257cec951ac"
+        },
+        {
+          "entry": "install/manager",
+          "path": "install/manager",
+          "sha256": "79479d78b969609f79b845e02bcd18501eabfffef96b92b5ca198070b181d280"
+        },
+        {
+          "entry": "install/scaffold.sh",
+          "path": "install/scaffold.sh",
+          "sha256": "e9cd68c59764f0b923eb4f6fa372e8f2e574f38ea5c1b9098504474e0ec149e9"
+        },
+        {
+          "entry": "install/scripts/common.py",
+          "path": "install/scripts/common.py",
+          "sha256": "4c0d2669be4d7292702be27a4bb9e732c3ef0b18bac3c147831f75c916dfbb17"
+        },
+        {
+          "entry": "install/scripts/doctor.py",
+          "path": "install/scripts/doctor.py",
+          "sha256": "5f874525b5a0e401564e3c90419062d2c2eb70ae678eb7f7c9fb308737a0d73d"
+        },
+        {
+          "entry": "install/scripts/import_existing.py",
+          "path": "install/scripts/import_existing.py",
+          "sha256": "4a99a4ee14fb775cb08a5dea1f892655ad952fcb060d9c695e689910786d71f4"
+        },
+        {
+          "entry": "install/scripts/instances.py",
+          "path": "install/scripts/instances.py",
+          "sha256": "6590270a72c0a8ea0775252c80d92a3f63d60d1a6ca70411f1d83a3c7825cc0e"
+        },
+        {
+          "entry": "install/scripts/management_api.py",
+          "path": "install/scripts/management_api.py",
+          "sha256": "20ce857877c5c92ac8e078514ca9d4775b684463abc63d4fffc79831ee80e64f"
+        },
+        {
+          "entry": "install/scripts/manager.py",
+          "path": "install/scripts/manager.py",
+          "sha256": "4bd5e08fb2385badfc2020d54c54d54b8642a23ecf4a68e45bab793fce683eb9"
+        },
+        {
+          "entry": "install/scripts/palctl.py",
+          "path": "install/scripts/palctl.py",
+          "sha256": "45ffe3556156a192d910412c8c346b6ed4e2b22dd48a8caca43cacd012851a12"
+        },
+        {
+          "entry": "install/scripts/policy.py",
+          "path": "install/scripts/policy.py",
+          "sha256": "a0e46de6785c1e5e03b1669fe15c613370ac5250827d841f320c70ca70bf9f29"
+        },
+        {
+          "entry": "install/scripts/reset_world.py",
+          "path": "install/scripts/reset_world.py",
+          "sha256": "f30704422bd57f27ccb38148d7916a233361a3cdcd92443f1dee30f72c88699b"
+        },
+        {
+          "entry": "install/scripts/resource_metrics.py",
+          "path": "install/scripts/resource_metrics.py",
+          "sha256": "9416e7cd22363e06bf946feba037c4dbb96efb0436b27e3b5acf39393022d9f7"
+        },
+        {
+          "entry": "install/scripts/restore_world.py",
+          "path": "install/scripts/restore_world.py",
+          "sha256": "feea84cac48e20033a09b115fe234acf1f60a210f8982590223063eba873b84b"
+        },
+        {
+          "entry": "install/scripts/world_backup.py",
+          "path": "install/scripts/world_backup.py",
+          "sha256": "c77e607e03606e71df9f1640e85b976d7374506bcdbfaf014e62513b02a20360"
+        },
+        {
+          "entry": "install/setup.sh",
+          "path": "install/setup.sh",
+          "sha256": "b7a87a40960049a3c86f132a160131dc3eec46ad62b4e9dad47213789ef9c6aa"
+        },
+        {
+          "entry": "install/test",
+          "path": "install/test",
+          "sha256": "30cb109fbe3bf7e70ef478b71f8fe3c757ba414a499bac41719f92c61823ccbc"
+        },
+        {
+          "entry": "scaffold/LICENSE",
+          "path": "LICENSE",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        },
+        {
+          "entry": "scaffold/operate/pal",
+          "path": "operate/pal",
+          "sha256": "460755628ba906147e445f9854f5d531fa211fe3dd53a9cb292bebe4c5714dbf"
+        },
+        {
+          "entry": "scaffold/config/kr/common.env",
+          "path": "config/kr/common.env",
+          "sha256": "0a154a21c23046cdb328cf8b455b477dc3320ce59f89124148ac78a4ad50cab4"
+        },
+        {
+          "entry": "scaffold/config/kr/server.template.env",
+          "path": "config/kr/server.template.env",
+          "sha256": "3f8d83d9bd5deda486475b7f843ee420857f6e2f76721ca23e1d7f3872076734"
+        },
+        {
+          "entry": "scaffold/config/en/common.env",
+          "path": "config/en/common.env",
+          "sha256": "c8f03e990b9e70512b682a68a337405d81abcc6c491889637290ab44027c1b20"
+        },
+        {
+          "entry": "scaffold/config/en/server.template.env",
+          "path": "config/en/server.template.env",
+          "sha256": "cb6eb0970d37ca422e5a1561a56113c0d59d825d5483f7bb4d5a580e94cd5ab6"
+        }
+      ]
+    },
+    "test": {
+      "file": "test.tar.gz",
+      "size": 30845,
+      "sha256": "853091e0bd95b7ccb2c39961d8e29dedc70827662b0d283fb7a202302dbbb60d",
+      "entries": [
+        "install/lib.sh",
+        "install/test",
+        "install/scripts/doctor.py",
+        "install/scripts/instances.py",
+        "install/scripts/policy.py"
+      ],
+      "sources": [
+        {
+          "entry": "install/lib.sh",
+          "path": "install/lib.sh",
+          "sha256": "1283c45df45f87ae693ca96d106237ed1542c9742485c9f146b68257cec951ac"
+        },
+        {
+          "entry": "install/test",
+          "path": "install/test",
+          "sha256": "30cb109fbe3bf7e70ef478b71f8fe3c757ba414a499bac41719f92c61823ccbc"
+        },
+        {
+          "entry": "install/scripts/doctor.py",
+          "path": "install/scripts/doctor.py",
+          "sha256": "5f874525b5a0e401564e3c90419062d2c2eb70ae678eb7f7c9fb308737a0d73d"
+        },
+        {
+          "entry": "install/scripts/instances.py",
+          "path": "install/scripts/instances.py",
+          "sha256": "6590270a72c0a8ea0775252c80d92a3f63d60d1a6ca70411f1d83a3c7825cc0e"
+        },
+        {
+          "entry": "install/scripts/policy.py",
+          "path": "install/scripts/policy.py",
+          "sha256": "a0e46de6785c1e5e03b1669fe15c613370ac5250827d841f320c70ca70bf9f29"
+        }
+      ]
+    },
+    "manage": {
+      "file": "manage.tar.gz",
+      "size": 110151,
+      "sha256": "d957daf78b99a9cc5083de73c55af749d814201656a6da06ddbb2fceda68941d",
+      "entries": [
+        "install/Dockerfile",
+        "install/lib.sh",
+        "install/manager",
+        "install/scripts/common.py",
+        "install/scripts/doctor.py",
+        "install/scripts/import_existing.py",
+        "install/scripts/instances.py",
+        "install/scripts/management_api.py",
+        "install/scripts/manager.py",
+        "install/scripts/palctl.py",
+        "install/scripts/policy.py",
+        "install/scripts/reset_world.py",
+        "install/scripts/resource_metrics.py",
+        "install/scripts/restore_world.py",
+        "install/scripts/world_backup.py"
+      ],
+      "sources": [
+        {
+          "entry": "install/Dockerfile",
+          "path": "install/Dockerfile",
+          "sha256": "fd49878bd105701ee6ce055c2e665dd61cdf4d6db28ba4574a38aa7ebaaeb0d0"
+        },
+        {
+          "entry": "install/lib.sh",
+          "path": "install/lib.sh",
+          "sha256": "1283c45df45f87ae693ca96d106237ed1542c9742485c9f146b68257cec951ac"
+        },
+        {
+          "entry": "install/manager",
+          "path": "install/manager",
+          "sha256": "79479d78b969609f79b845e02bcd18501eabfffef96b92b5ca198070b181d280"
+        },
+        {
+          "entry": "install/scripts/common.py",
+          "path": "install/scripts/common.py",
+          "sha256": "4c0d2669be4d7292702be27a4bb9e732c3ef0b18bac3c147831f75c916dfbb17"
+        },
+        {
+          "entry": "install/scripts/doctor.py",
+          "path": "install/scripts/doctor.py",
+          "sha256": "5f874525b5a0e401564e3c90419062d2c2eb70ae678eb7f7c9fb308737a0d73d"
+        },
+        {
+          "entry": "install/scripts/import_existing.py",
+          "path": "install/scripts/import_existing.py",
+          "sha256": "4a99a4ee14fb775cb08a5dea1f892655ad952fcb060d9c695e689910786d71f4"
+        },
+        {
+          "entry": "install/scripts/instances.py",
+          "path": "install/scripts/instances.py",
+          "sha256": "6590270a72c0a8ea0775252c80d92a3f63d60d1a6ca70411f1d83a3c7825cc0e"
+        },
+        {
+          "entry": "install/scripts/management_api.py",
+          "path": "install/scripts/management_api.py",
+          "sha256": "20ce857877c5c92ac8e078514ca9d4775b684463abc63d4fffc79831ee80e64f"
+        },
+        {
+          "entry": "install/scripts/manager.py",
+          "path": "install/scripts/manager.py",
+          "sha256": "4bd5e08fb2385badfc2020d54c54d54b8642a23ecf4a68e45bab793fce683eb9"
+        },
+        {
+          "entry": "install/scripts/palctl.py",
+          "path": "install/scripts/palctl.py",
+          "sha256": "45ffe3556156a192d910412c8c346b6ed4e2b22dd48a8caca43cacd012851a12"
+        },
+        {
+          "entry": "install/scripts/policy.py",
+          "path": "install/scripts/policy.py",
+          "sha256": "a0e46de6785c1e5e03b1669fe15c613370ac5250827d841f320c70ca70bf9f29"
+        },
+        {
+          "entry": "install/scripts/reset_world.py",
+          "path": "install/scripts/reset_world.py",
+          "sha256": "f30704422bd57f27ccb38148d7916a233361a3cdcd92443f1dee30f72c88699b"
+        },
+        {
+          "entry": "install/scripts/resource_metrics.py",
+          "path": "install/scripts/resource_metrics.py",
+          "sha256": "9416e7cd22363e06bf946feba037c4dbb96efb0436b27e3b5acf39393022d9f7"
+        },
+        {
+          "entry": "install/scripts/restore_world.py",
+          "path": "install/scripts/restore_world.py",
+          "sha256": "feea84cac48e20033a09b115fe234acf1f60a210f8982590223063eba873b84b"
+        },
+        {
+          "entry": "install/scripts/world_backup.py",
+          "path": "install/scripts/world_backup.py",
+          "sha256": "c77e607e03606e71df9f1640e85b976d7374506bcdbfaf014e62513b02a20360"
+        }
+      ]
+    }
+  }
+}

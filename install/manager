@@ -1,0 +1,1669 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+
+usage() {
+    cat <<'EOF'
+사용법:
+  manager
+  manager prepare
+  manager prepare-scaffold --scaffold DIR --language ko|en [--launcher FILE]
+  manager setup [--server serverN] [--test-timeout 초]
+  manager update --server serverN [--test-timeout 초]
+  manager reset --server serverN [--wait 초] [--startup-timeout 초]
+  manager restore --server serverN [--list-json | --backup NAME --yes] [--wait 초]
+  manager token --server serverN [--show | --rotate]
+  manager write-env --kind common|server [--server serverN] --source FILE --expected-sha256 HASH
+  manager host-time
+  manager import-commit --saved DIR --world-guid GUID --server serverN --env-file FILE --game-port PORT --rest-port PORT
+  manager import-tool discover|inspect|validate-ports|stop [options]
+  manager test --server serverN[,serverN...] [--wait 초]
+  manager list [--format table|json]
+  manager remove --servers serverN[,serverN...]
+  manager remove --all
+  manager remove --project
+EOF
+}
+
+SERVER_NAMES=()
+SERVER_ROWS=()
+CONFIGURED_SERVER_NAMES=()
+GUARDED_WORLD_ARGUMENTS=()
+GUARDED_WORLD_SERVER=""
+
+require_python() {
+    command -v python3 >/dev/null 2>&1 \
+        && python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' \
+            >/dev/null 2>&1 || {
+        echo "오류: Python 3.9 이상이 필요합니다. Setup을 먼저 실행하거나 python3를 업그레이드하세요." >&2
+        return 1
+    }
+}
+
+refresh_servers() {
+    SERVER_NAMES=()
+    SERVER_ROWS=()
+    local row name _rest output=""
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "오류: 서버 목록을 조회하려면 python3가 필요합니다." >&2
+        return 1
+    fi
+    if ! output="$(python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" list --format table)"; then
+        echo "오류: Docker 서버 목록을 안전하게 조회하지 못했습니다." >&2
+        return 1
+    fi
+    if [[ -n "$output" ]]; then
+        mapfile -t SERVER_ROWS <<<"$output"
+    fi
+    for row in "${SERVER_ROWS[@]}"; do
+        IFS=$'\t' read -r name _rest <<<"$row"
+        SERVER_NAMES+=("$name")
+    done
+}
+
+print_servers() {
+    refresh_servers
+    echo "총 서버 개수: ${#SERVER_ROWS[@]}개"
+    if (( ${#SERVER_ROWS[@]} == 0 )); then
+        echo "  설치된 서버 없음"
+        return
+    fi
+    local index=1 row name container image state status
+    for row in "${SERVER_ROWS[@]}"; do
+        IFS=$'\t' read -r name container image state status <<<"$row"
+        echo "  $index. $container (image: $image, state: $state, $status)"
+        ((index += 1))
+    done
+}
+
+refresh_configured_servers() {
+    CONFIGURED_SERVER_NAMES=()
+    local path name
+    for path in "$PALWORLD_PROJECT_DIR"/config/server[0-9]*.env; do
+        [[ -e "$path" ]] || continue
+        name="$(basename -- "$path" .env)"
+        validate_server_name "$name" || continue
+        CONFIGURED_SERVER_NAMES+=("$name")
+    done
+    if (( ${#CONFIGURED_SERVER_NAMES[@]} > 1 )); then
+        mapfile -t CONFIGURED_SERVER_NAMES < <(
+            printf '%s\n' "${CONFIGURED_SERVER_NAMES[@]}" | sort -V
+        )
+    fi
+}
+
+print_configured_servers() {
+    refresh_configured_servers
+    local index=1 name state
+    for name in "${CONFIGURED_SERVER_NAMES[@]}"; do
+        if docker container inspect "palworld-$name" >/dev/null 2>&1; then
+            state="설치됨"
+        else
+            state="설정만 존재"
+        fi
+        echo "  $index. $name ($state, config/$name.env)"
+        ((index += 1))
+    done
+}
+
+parse_server_indexes() {
+    local raw="${1//[[:space:]]/}"
+    local values=() value index
+    SELECTED_SERVERS=()
+    IFS=',' read -r -a values <<<"$raw"
+    (( ${#values[@]} > 0 )) || return 1
+    for value in "${values[@]}"; do
+        [[ "$value" =~ ^[0-9]+$ ]] || return 1
+        index=$((value - 1))
+        (( index >= 0 && index < ${#SERVER_NAMES[@]} )) || return 1
+        if [[ ! " ${SELECTED_SERVERS[*]} " =~ " ${SERVER_NAMES[$index]} " ]]; then
+            SELECTED_SERVERS+=("${SERVER_NAMES[$index]}")
+        fi
+    done
+}
+
+join_servers() {
+    local IFS=,
+    echo "$*"
+}
+
+is_quit_choice() {
+    [[ "${1:-}" == q || "${1:-}" == Q ]]
+}
+
+run_setup() {
+    if (( EUID == 0 )); then
+        bash "$SCRIPT_DIR/setup.sh" "$@"
+    else
+        sudo env \
+            PALWORLD_PROJECT_DIR="$PALWORLD_PROJECT_DIR" \
+            PALWORLD_INSTALL_DIR="$PALWORLD_INSTALL_DIR" \
+            bash "$SCRIPT_DIR/setup.sh" "$@"
+    fi
+}
+
+run_test() {
+    "$SCRIPT_DIR/test" "$@"
+}
+
+run_privileged_manager() {
+    if (( EUID == 0 )); then
+        bash "$SCRIPT_DIR/manager" "$@"
+    else
+        sudo env \
+            PALWORLD_PROJECT_DIR="$PALWORLD_PROJECT_DIR" \
+            PALWORLD_INSTALL_DIR="$PALWORLD_INSTALL_DIR" \
+            bash "$SCRIPT_DIR/manager" "$@"
+    fi
+}
+
+inspect_container_id_or_missing() {
+    local container="$1"
+    local output="" detail=""
+    if output="$(docker container inspect --format '{{.Id}}' "$container" 2>&1)"; then
+        if [[ "$output" =~ ^[a-f0-9]{12,64}$ ]]; then
+            printf '%s\n' "$output"
+            return 0
+        fi
+        echo "오류: $container Docker inspect가 잘못된 immutable ID를 반환했습니다." >&2
+        return 1
+    fi
+    detail="${output,,}"
+    if [[ "$detail" == *"no such"* || "$detail" == *"not found"* ]]; then
+        return 3
+    fi
+    echo "오류: $container Docker 상태를 확인하지 못했습니다: $output" >&2
+    return 1
+}
+
+read_live_container_token() {
+    local container_id="$1"
+    local output="" line="" token="" count=0
+    if ! output="$(docker container inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" 2>&1)"; then
+        echo "오류: 실행 컨테이너의 API token 설정을 확인하지 못했습니다: $output" >&2
+        return 1
+    fi
+    while IFS= read -r line; do
+        if [[ "$line" == API_ACCESS_TOKEN=* ]]; then
+            token="${line#API_ACCESS_TOKEN=}"
+            ((count += 1))
+        fi
+    done <<<"$output"
+    if (( count != 1 )); then
+        echo "오류: 실행 컨테이너에 API_ACCESS_TOKEN이 정확히 한 번 설정되어 있지 않습니다." >&2
+        return 1
+    fi
+    printf '%s\n' "$token"
+}
+
+tokens_match() {
+    printf '%s\n%s\n' "$1" "$2" | python3 -c '
+import hmac
+import sys
+values = sys.stdin.read().splitlines()
+raise SystemExit(0 if len(values) == 2 and hmac.compare_digest(*values) else 1)
+'
+}
+
+wait_for_token_rotation_recovery() {
+    local server="$1"
+    local timeout_seconds="${2:-1200}"
+    local expected_token="$3"
+    local container="palworld-$server"
+    local deadline=$((SECONDS + timeout_seconds))
+    local next_notice=$SECONDS
+    local state="unknown"
+
+    echo "$server 새 token 적용 후 컨테이너, 관리 API와 현재 운영 정책 상태 복구를 확인합니다."
+    while (( SECONDS < deadline )); do
+        state="$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
+        if [[ "$state" == running ]] && printf '%s' "$expected_token" \
+            | docker exec -i "$container" python3 -c '
+import base64
+import hmac
+import json
+import os
+import sys
+import urllib.request
+
+port = int(os.getenv("MANAGER_API_PORT", "18080"))
+username = os.getenv("API_USERNAME", "admin")
+password = os.getenv("PAL_SETTING_AdminPassword", "")
+token = os.getenv("API_ACCESS_TOKEN", "")
+expected_token = sys.stdin.read()
+if not hmac.compare_digest(token, expected_token):
+    raise SystemExit(1)
+credentials = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+request = urllib.request.Request(f"http://127.0.0.1:{port}/v1/manager/status")
+request.add_header("Authorization", f"Basic {credentials}")
+request.add_header("X-Palworld-Manager-Token", token)
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(request, timeout=3) as response:
+    status = json.load(response)
+ready = (
+    status.get("manager") == "running"
+    and status.get("game") != "update-failed"
+    and not status.get("policy_error")
+    and "policy" in status
+    and isinstance(status.get("desired_running"), bool)
+)
+desired_running = status.get("desired_running")
+if desired_running is True:
+    ready = ready and status.get("game") == "running"
+    if ready:
+        info_request = urllib.request.Request(f"http://127.0.0.1:{port}/v1/api/info")
+        info_request.add_header("Authorization", f"Basic {credentials}")
+        info_request.add_header("X-Palworld-Manager-Token", token)
+        with opener.open(info_request, timeout=5) as response:
+            info = json.load(response)
+        ready = isinstance(info, dict)
+elif desired_running is False:
+    ready = (
+        ready
+        and status.get("game") not in {"running", "starting", "stopping"}
+    )
+else:
+    ready = False
+if ready:
+    resource_request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/manager/resources/current"
+    )
+    resource_request.add_header("Authorization", f"Basic {credentials}")
+    resource_request.add_header("X-Palworld-Manager-Token", token)
+    with opener.open(resource_request, timeout=5) as response:
+        resources = json.load(response)
+    ready = isinstance(resources, dict) and isinstance(resources.get("host"), dict)
+raise SystemExit(0 if ready else 1)
+' >/dev/null 2>&1; then
+            echo "$server 새 token 인증과 재시작 상태 확인 완료."
+            return 0
+        fi
+        if (( SECONDS >= next_notice )); then
+            echo "[PROGRESS] $server token 적용 후 재시작 대기 중 · 컨테이너 $state · 제한 시간까지 $((deadline - SECONDS))초"
+            next_notice=$((SECONDS + 15))
+        fi
+        sleep 2
+    done
+
+    echo "오류: $server token 적용 후 ${timeout_seconds}초 안에 관리 API와 게임 상태가 복구되지 않았습니다." >&2
+    docker inspect --format '컨테이너 상태={{.State.Status}}, 종료코드={{.State.ExitCode}}, 오류={{.State.Error}}' \
+        "$container" >&2 2>/dev/null || true
+    docker logs --tail 80 "$container" >&2 2>/dev/null || true
+    return 1
+}
+
+recover_token_rotation_state() {
+    local server="$1"
+    local env_file="$2"
+    local env_backup="$3"
+    local has_container="$4"
+    local was_running="$5"
+    local recovery_failed=false
+    local expected_token=""
+    local token_ready=true
+
+    if [[ -z "$env_backup" || ! -f "$env_backup" ]]; then
+        echo "오류: token 복구용 server env 백업을 찾을 수 없습니다: $env_backup" >&2
+        return 1
+    fi
+    # Keep the immutable backup until every recovery step has succeeded. If
+    # Compose generation or the container restart fails, operators still have
+    # both the restored env and an exact recovery copy to inspect or reinstall.
+    if ! cp -p -- "$env_backup" "$env_file"; then
+        echo "오류: 기존 server env 복원에 실패했습니다: $env_file" >&2
+        echo "복구용 백업을 보존했습니다: $env_backup" >&2
+        return 1
+    fi
+    chmod 0600 "$env_file" || recovery_failed=true
+    generate_compose || recovery_failed=true
+    if ! expected_token="$(python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" access-token "$server")"; then
+        token_ready=false
+        recovery_failed=true
+    fi
+    if [[ "$has_container" == true && "$was_running" == true ]]; then
+        if palworld_compose up -d --no-build --force-recreate "$server"; then
+            if [[ "$token_ready" == true ]] && wait_for_token_rotation_recovery \
+                "$server" 1200 "$expected_token"; then
+                echo "$server 기존 token과 실행 상태를 복구했습니다." >&2
+            else
+                recovery_failed=true
+            fi
+        else
+            recovery_failed=true
+        fi
+    elif [[ "$has_container" == true ]]; then
+        palworld_compose up --no-start --no-build --force-recreate "$server" \
+            || recovery_failed=true
+    fi
+    if [[ "$recovery_failed" == false ]]; then
+        rm -f -- "$env_backup"
+        return 0
+    fi
+    echo "복구용 백업을 보존했습니다: $env_backup" >&2
+    return 1
+}
+
+handle_token_rotation_signal() {
+    local signal_name="$1"
+    # These variables are local to manage_server_token and visible here through
+    # Bash's dynamic function scope.
+    trap '' HUP INT TERM
+    echo >&2
+    echo "경고: token 재발급이 $signal_name 신호로 중단되어 기존 설정과 실행 상태를 복구합니다." >&2
+    if recover_token_rotation_state \
+        "$server" "$env_file" "$env_backup" \
+        "$has_container" "$was_running"; then
+        env_backup=""
+        echo "PALWORLD_TOKEN_STATE=rolled-back" >&2
+    else
+        recovery_failed=true
+        [[ ! -f "$env_backup" ]] || echo "복구용 백업을 보존했습니다: $env_backup" >&2
+        echo "치명적 경고: 자동 복구가 완료되지 않았습니다. config/$server.env와 $container 상태를 확인하세요." >&2
+        echo "PALWORLD_TOKEN_STATE=indeterminate" >&2
+    fi
+    exit 130
+}
+
+manage_server_token() {
+    local server="" action="" arg token container has_container=false was_running=false
+    local env_file="" env_backup="" failure_step="" recovery_failed=false
+    local status_json="" expected_state="" container_id="" inspect_status=0 live_token="" running_state=""
+    while (( $# > 0 )); do
+        arg="$1"
+        shift
+        case "$arg" in
+            --server) [[ $# -gt 0 ]] || { usage >&2; exit 2; }; server="$1"; shift ;;
+            --show) action=show ;;
+            --rotate) action=rotate ;;
+            *) usage >&2; exit 2 ;;
+        esac
+    done
+    validate_server_name "$server" || { echo "오류: --server serverN이 필요합니다." >&2; exit 2; }
+    [[ "$action" == show || "$action" == rotate ]] || { usage >&2; exit 2; }
+    if [[ "$action" == show ]]; then
+        require_python
+        acquire_palworld_project_operation_lock
+        token="$(python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" access-token "$server")"
+        container="palworld-$server"
+        container_id="$(inspect_container_id_or_missing "$container")" || inspect_status=$?
+        if (( inspect_status != 0 && inspect_status != 3 )); then
+            return 1
+        fi
+        if (( inspect_status == 0 )); then
+            live_token="$(read_live_container_token "$container_id")" || return 1
+            if ! tokens_match "$token" "$live_token"; then
+                echo "오류: config/$server.env와 실행 컨테이너의 API token이 서로 다릅니다." >&2
+                echo "Manage → 이미지 갱신 및 설정 재적용을 실행하거나 API token을 재발급하세요." >&2
+                return 1
+            fi
+        fi
+        printf '%s\n' "$token"
+        return
+    fi
+    assert_root
+    assert_palworld_host_project_owner
+    acquire_palworld_project_operation_lock
+    container="palworld-$server"
+    container_id="$(inspect_container_id_or_missing "$container")" || inspect_status=$?
+    if (( inspect_status != 0 && inspect_status != 3 )); then
+        return 1
+    fi
+    if (( inspect_status == 0 )); then
+        has_container=true
+        # A legacy image ignores POLICY_FILE and UPDATE_LOCK_FILE. Recreating it
+        # with the new mounts would silently fall back to an ephemeral policy,
+        # so reject before saving, stopping, or rotating the token.
+        require_current_image_runtime_layout_for_token_rotation "$container_id"
+    fi
+    # Validate or migrate the persistent policy before stopping a live game.
+    # Token rotation is rejected without downtime when policy repair is needed.
+    prepare_server_policy_storage "$server" "$PALWORLD_UID" "$PALWORLD_GID"
+    prepare_shared_update_storage "$PALWORLD_UID" "$PALWORLD_GID"
+    if [[ "$has_container" == true ]]; then
+        preflight_server_policy_storage "$server" "$PALWORLD_UID" "$PALWORLD_GID"
+        preflight_shared_update_storage "$PALWORLD_UID" "$PALWORLD_GID"
+    fi
+    # Render once with the current configuration while the old container is
+    # still untouched. Port/config errors must not cause token-rotation downtime.
+    generate_compose
+
+    env_file="$PALWORLD_PROJECT_DIR/config/$server.env"
+    env_backup="$(mktemp "$PALWORLD_PROJECT_DIR/config/.$server.env.token-backup.XXXXXXXX")"
+    cp -p -- "$env_file" "$env_backup"
+    if [[ "$has_container" == true ]]; then
+        if ! running_state="$(docker inspect --format '{{.State.Running}}' "$container_id" 2>&1)"; then
+            echo "오류: $server 실행 상태를 확인하지 못해 token을 변경하지 않았습니다: $running_state" >&2
+            rm -f -- "$env_backup"
+            return 1
+        fi
+        [[ "$running_state" == true || "$running_state" == false ]] || {
+            echo "오류: $server Docker 실행 상태 값이 잘못되었습니다: $running_state" >&2
+            rm -f -- "$env_backup"
+            return 1
+        }
+        [[ "$running_state" == true ]] && was_running=true
+        if [[ "$was_running" == true ]]; then
+            status_json="$(docker exec "$container_id" palctl status 2>/dev/null || true)"
+            expected_state="$(python3 -c '
+import json
+import sys
+
+status = json.load(sys.stdin)
+if (
+    status.get("manager") != "running"
+    or "policy" not in status
+    or status.get("policy_error")
+    or not isinstance(status.get("desired_running"), bool)
+):
+    raise SystemExit(1)
+expected = status["desired_running"]
+print("true" if expected else "false")
+' <<<"$status_json" 2>/dev/null || true)"
+            if [[ "$expected_state" != true && "$expected_state" != false ]]; then
+                echo "오류: $server 현재 게임 실행 정책을 확인할 수 없어 token을 변경하지 않았습니다." >&2
+                rm -f -- "$env_backup"
+                return 1
+            fi
+            echo "$server API token 적용 전 월드를 저장합니다. 컨테이너는 Compose가 안전하게 재시작합니다."
+            if [[ "$expected_state" == true ]] \
+                && ! docker exec "$container_id" palctl save >/dev/null 2>&1; then
+                echo "오류: $server 월드 저장에 실패해 token을 변경하지 않았습니다." >&2
+                rm -f -- "$env_backup"
+                return 1
+            fi
+        fi
+    fi
+
+    trap 'handle_token_rotation_signal HUP' HUP
+    trap 'handle_token_rotation_signal INT' INT
+    trap 'handle_token_rotation_signal TERM' TERM
+
+    if ! token="$(python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" rotate-token "$server")"; then
+        failure_step="API access token 파일 갱신"
+    elif ! chmod 0600 "$env_file"; then
+        failure_step="server env 권한 적용"
+    elif ! generate_compose; then
+        failure_step="Compose 설정 생성"
+    elif [[ "$has_container" == true && "$was_running" == true ]] \
+        && ! palworld_compose up -d --no-build --force-recreate "$server"; then
+        failure_step="실행 중 컨테이너 재생성"
+    elif [[ "$has_container" == true && "$was_running" == true ]] \
+        && ! wait_for_token_rotation_recovery \
+            "$server" 1200 "$token"; then
+        failure_step="재시작 후 API·게임 상태 확인"
+    elif [[ "$has_container" == true && "$was_running" != true ]] \
+        && ! palworld_compose up --no-start --no-build --force-recreate "$server"; then
+        failure_step="정지된 컨테이너 재생성"
+    fi
+
+    if [[ -n "$failure_step" ]]; then
+        echo "오류: $server token 재발급 중 실패했습니다: $failure_step" >&2
+        trap '' HUP INT TERM
+        if recover_token_rotation_state \
+            "$server" "$env_file" "$env_backup" \
+            "$has_container" "$was_running"; then
+            env_backup=""
+            echo "PALWORLD_TOKEN_STATE=rolled-back" >&2
+        else
+            recovery_failed=true
+            [[ ! -f "$env_backup" ]] || echo "복구용 백업을 보존했습니다: $env_backup" >&2
+        fi
+        trap - HUP INT TERM
+        if [[ "$recovery_failed" == true ]]; then
+            echo "치명적 경고: 자동 복구가 완료되지 않았습니다. config/$server.env와 $container 상태를 확인한 뒤 Setup/Manage를 실행하세요." >&2
+            echo "PALWORLD_TOKEN_STATE=indeterminate" >&2
+        fi
+        return 1
+    fi
+    trap - HUP INT TERM
+    rm -f -- "$env_backup"
+    echo "PALWORLD_TOKEN_STATE=applied"
+    echo
+    echo "$server 새 API access token:"
+    echo "$token"
+    echo
+    echo "저장 위치: config/$server.env의 API_ACCESS_TOKEN"
+    if [[ "$has_container" == true && "$was_running" == true ]]; then
+        echo "기존 토큰은 즉시 폐기되었고, 컨테이너·관리 API·기존 게임 실행 상태의 재시작을 확인했습니다."
+    elif [[ "$has_container" == true ]]; then
+        echo "기존 토큰은 즉시 폐기되었습니다. 정지된 컨테이너를 새 token 설정으로 재생성했으며 다음 시작부터 적용됩니다."
+    else
+        echo "기존 토큰은 즉시 폐기되었습니다. 컨테이너가 없어 server env에만 새 token을 저장했습니다."
+    fi
+    echo "연결된 Windows 프로그램의 Token을 갱신하세요."
+}
+
+acquire_common_or_registered_project_guard() {
+    local registered="" registration_status=0
+    acquire_palworld_host_operation_lock
+    registered="$(read_palworld_host_project_registration)" || registration_status=$?
+    if (( registration_status == 3 )); then
+        # Common Settings is intentionally reviewed before the first Setup.
+        # With no registered project, the stable host lock plus a second claim
+        # check is sufficient because this path changes only the selected
+        # project's file (not Docker or host-global configuration).
+        assert_palworld_host_project_claim_available
+        return 0
+    fi
+    (( registration_status == 0 )) || return 1
+    if [[ "$registered" != "$PALWORLD_PROJECT_DIR" ]]; then
+        echo "오류: 다른 프로젝트가 이 Docker 호스트에 등록되어 있어 작업을 중단했습니다." >&2
+        echo "등록 프로젝트: $registered" >&2
+        echo "현재 프로젝트: $PALWORLD_PROJECT_DIR" >&2
+        return 1
+    fi
+    acquire_palworld_project_operation_lock
+}
+
+prepare_project_scaffold() {
+    local scaffold_dir="" language="" launcher_path="" arg=""
+    while (( $# > 0 )); do
+        arg="$1"
+        shift
+        case "$arg" in
+            --scaffold) [[ $# -gt 0 ]] || { usage >&2; return 2; }; scaffold_dir="$1"; shift ;;
+            --language) [[ $# -gt 0 ]] || { usage >&2; return 2; }; language="$1"; shift ;;
+            --launcher) [[ $# -gt 0 ]] || { usage >&2; return 2; }; launcher_path="$1"; shift ;;
+            *) usage >&2; return 2 ;;
+        esac
+    done
+    [[ "$scaffold_dir" == /* && -d "$scaffold_dir" && ! -L "$scaffold_dir" ]] || {
+        echo "오류: 안전한 scaffold 디렉터리가 필요합니다: $scaffold_dir" >&2
+        return 1
+    }
+    [[ "$language" == ko || "$language" == en ]] || {
+        echo "오류: --language ko 또는 en이 필요합니다." >&2
+        return 2
+    }
+    [[ -f "$scaffold_dir/operate/pal" && -f "$scaffold_dir/LICENSE" ]] || {
+        echo "오류: scaffold 필수 파일이 누락되었습니다: $scaffold_dir" >&2
+        return 1
+    }
+    if [[ -n "$launcher_path" ]]; then
+        [[ "$launcher_path" == /* && -f "$launcher_path" && ! -L "$launcher_path" ]] || {
+            echo "오류: --launcher는 실행 중인 일반 설치 파일의 절대 경로여야 합니다: $launcher_path" >&2
+            return 2
+        }
+        launcher_path="$(cd -- "$(dirname -- "$launcher_path")" && pwd -P)/$(basename -- "$launcher_path")"
+        [[ "$(dirname -- "$launcher_path")" == "$PALWORLD_PROJECT_DIR" ]] || {
+            echo "오류: --launcher는 현재 프로젝트 디렉터리 안에 있을 때만 지정할 수 있습니다." >&2
+            return 2
+        }
+    fi
+    assert_root
+    acquire_palworld_host_operation_lock
+    local registered="" registration_status=0
+    registered="$(read_palworld_host_project_registration)" || registration_status=$?
+    if (( registration_status == 0 )); then
+        if [[ "$registered" != "$PALWORLD_PROJECT_DIR" ]]; then
+            echo "오류: 다른 프로젝트가 이 Docker 호스트에 등록되어 있어 scaffold를 변경하지 않습니다." >&2
+            echo "등록 프로젝트: $registered" >&2
+            echo "현재 프로젝트: $PALWORLD_PROJECT_DIR" >&2
+            return 1
+        fi
+        acquire_palworld_project_operation_lock
+    elif (( registration_status == 3 )); then
+        assert_palworld_host_project_claim_available
+    else
+        return 1
+    fi
+
+    local marker="$PALWORLD_PROJECT_DIR/.palworld-server-operations-project"
+    local recognized=false empty=false legacy=false existing_entry="" entries_output=""
+    if [[ -e "$marker" || -L "$marker" ]]; then
+        [[ -f "$marker" && ! -L "$marker" \
+            && "$(cat -- "$marker")" == palworld-server-operations-project-v1 ]] || {
+            echo "오류: 프로젝트 표식이 안전하지 않거나 다른 형식입니다: $marker" >&2
+            return 1
+        }
+        recognized=true
+    elif [[ -f "$PALWORLD_PROJECT_DIR/config/common.env" \
+        && -f "$PALWORLD_PROJECT_DIR/operate/pal" ]]; then
+        legacy=true
+        recognized=true
+    else
+        if ! entries_output="$(find "$PALWORLD_PROJECT_DIR" -mindepth 1 -maxdepth 1 -print)"; then
+            echo "오류: 프로젝트 디렉터리 내용을 안전하게 검사하지 못했습니다: $PALWORLD_PROJECT_DIR" >&2
+            return 1
+        fi
+        existing_entry=""
+        local candidate_entry=""
+        while IFS= read -r candidate_entry; do
+            [[ -n "$launcher_path" && "$candidate_entry" == "$launcher_path" ]] && continue
+            existing_entry="$candidate_entry"
+            break
+        done <<<"$entries_output"
+        [[ -z "$existing_entry" ]] && empty=true
+    fi
+    if [[ "$recognized" != true && "$empty" != true ]]; then
+        echo "오류: 기존 일반 파일이 있는 디렉터리는 관리 프로젝트로 초기화하지 않습니다: $PALWORLD_PROJECT_DIR" >&2
+        echo "발견 항목: $existing_entry" >&2
+        return 1
+    fi
+
+    local target_uid="${SUDO_UID:-$PALWORLD_PROJECT_UID}"
+    local target_gid="${SUDO_GID:-$PALWORLD_PROJECT_GID}"
+    [[ "$target_uid" =~ ^[0-9]+$ && "$target_gid" =~ ^[0-9]+$ \
+        && "$target_uid" -ge 1000 && "$target_gid" -ge 1000 ]] || {
+        echo "오류: scaffold 소유자로 사용할 SSH 사용자 UID/GID를 확인할 수 없습니다." >&2
+        return 1
+    }
+    local current_uid="" current_gid="" target_user=""
+    current_uid="$(stat -c '%u' -- "$PALWORLD_PROJECT_DIR")"
+    current_gid="$(stat -c '%g' -- "$PALWORLD_PROJECT_DIR")"
+    if [[ "$empty" != true && ( "$current_uid" != "$target_uid" || "$current_gid" != "$target_gid" ) ]]; then
+        echo "오류: 기존 프로젝트의 소유자를 자동 변경하지 않습니다." >&2
+        echo "현재 UID:GID=$current_uid:$current_gid, SSH UID:GID=$target_uid:$target_gid" >&2
+        return 1
+    fi
+    if [[ "$empty" == true ]]; then
+        chown "$target_uid:$target_gid" "$PALWORLD_PROJECT_DIR"
+    fi
+    chmod 0755 "$PALWORLD_PROJECT_DIR"
+    target_user="$(getent passwd "$target_uid" | cut -d: -f1)"
+    [[ -n "$target_user" ]] || { echo "오류: SSH UID $target_uid 사용자 계정을 찾을 수 없습니다." >&2; return 1; }
+    command -v runuser >/dev/null 2>&1 || { echo "오류: scaffold 실행에 필요한 runuser가 없습니다." >&2; return 1; }
+    runuser -u "$target_user" -- env PALWORLD_ENV_LANGUAGE="$language" \
+        PALWORLD_PROJECT_LAUNCHER_PATH="$launcher_path" \
+        bash "$PALWORLD_INSTALL_DIR/scaffold.sh" "$PALWORLD_PROJECT_DIR" "$scaffold_dir"
+    printf 'PAL_WORK_READY=yes\nPAL_WORK_OWNER=%s\n' \
+        "$(stat -c '%U:%G' -- "$PALWORLD_PROJECT_DIR")"
+}
+
+apply_guarded_host_time() {
+    assert_root
+    acquire_common_or_registered_project_guard
+    local common_file="$PALWORLD_PROJECT_DIR/config/common.env"
+    [[ -f "$common_file" && ! -L "$common_file" ]] || {
+        echo "오류: config/common.env가 안전한 일반 파일이 아닙니다." >&2
+        return 1
+    }
+    local timezone="" previous="" current="" zone_ready=no ntp=unknown
+    timezone="$(awk -F= '
+        {
+            key=$1
+            gsub(/^[ \t]+|[ \t]+$/, "", key)
+            if (key == "TZ") {
+                sub(/^[^=]*=/, "")
+                gsub(/^[ \t]+|[ \t]+$/, "")
+                if (($0 ~ /^".*"$/) || ($0 ~ /^\047.*\047$/)) {
+                    print substr($0, 2, length($0) - 2)
+                } else {
+                    print
+                }
+                exit
+            }
+        }
+    ' "$common_file")"
+    if [[ ! "$timezone" =~ ^[A-Za-z0-9_+.-]+(/[A-Za-z0-9_+.-]+)*$ ]] \
+        || [[ "$timezone" =~ (^|/)\.{1,2}(/|$) ]]; then
+        echo "오류: config/common.env의 TZ가 유효한 IANA 시간대가 아닙니다: $timezone" >&2
+        return 1
+    fi
+    if command -v timedatectl >/dev/null 2>&1; then
+        previous="$(timedatectl show --property=Timezone --value 2>/dev/null || true)"
+    fi
+    [[ -n "$previous" ]] || { [[ ! -r /etc/timezone ]] || previous="$(tr -d '[:space:]' </etc/timezone)"; }
+    if [[ -f "/usr/share/zoneinfo/$timezone" ]]; then
+        zone_ready=yes
+        if [[ "$previous" != "$timezone" ]]; then
+            if command -v timedatectl >/dev/null 2>&1 \
+                && timedatectl set-timezone "$timezone"; then
+                :
+            else
+                ln -snf "/usr/share/zoneinfo/$timezone" /etc/localtime
+                printf '%s\n' "$timezone" >/etc/timezone
+            fi
+        fi
+    fi
+    if command -v timedatectl >/dev/null 2>&1; then
+        current="$(timedatectl show --property=Timezone --value 2>/dev/null || true)"
+        ntp="$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || printf unknown)"
+    fi
+    [[ -n "$current" ]] || { [[ ! -r /etc/timezone ]] || current="$(tr -d '[:space:]' </etc/timezone)"; }
+    printf 'PAL_TZ_PREVIOUS=%s\nPAL_TZ_CURRENT=%s\nPAL_TZ_READY=%s\nPAL_REMOTE_EPOCH=%s\nPAL_REMOTE_TIME=%s\nPAL_NTP=%s\n' \
+        "${previous:-unknown}" "${current:-unknown}" "$zone_ready" \
+        "$(date '+%s')" "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$ntp"
+}
+
+write_managed_env() {
+    local kind="" server="" source_file="" expected_hash="" arg=""
+    while (( $# > 0 )); do
+        arg="$1"
+        shift
+        case "$arg" in
+            --kind) [[ $# -gt 0 ]] || { usage >&2; return 2; }; kind="$1"; shift ;;
+            --server) [[ $# -gt 0 ]] || { usage >&2; return 2; }; server="$1"; shift ;;
+            --source) [[ $# -gt 0 ]] || { usage >&2; return 2; }; source_file="$1"; shift ;;
+            --expected-sha256) [[ $# -gt 0 ]] || { usage >&2; return 2; }; expected_hash="$1"; shift ;;
+            *) usage >&2; return 2 ;;
+        esac
+    done
+    [[ "$kind" == common || "$kind" == server ]] || { echo "오류: --kind common 또는 server가 필요합니다." >&2; return 2; }
+    [[ "$expected_hash" =~ ^[a-f0-9]{64}$ ]] || { echo "오류: --expected-sha256 값이 잘못되었습니다." >&2; return 2; }
+    [[ "$source_file" == /* && -f "$source_file" && ! -L "$source_file" ]] || {
+        echo "오류: 업로드된 env 원본이 안전한 일반 파일이 아닙니다: $source_file" >&2
+        return 1
+    }
+    if [[ "$kind" == server ]]; then
+        validate_server_name "$server" || { echo "오류: --server serverN이 필요합니다." >&2; return 2; }
+    elif [[ -n "$server" ]]; then
+        echo "오류: common env 저장에는 --server를 사용할 수 없습니다." >&2
+        return 2
+    fi
+
+    assert_root
+    if [[ "$kind" == common ]]; then
+        acquire_common_or_registered_project_guard
+    else
+        assert_palworld_host_project_owner
+        acquire_palworld_project_operation_lock
+        python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" assert-server-ownership "$server"
+    fi
+
+    local target_file="" backup_dir="" backup_prefix="" mode="" review_file=""
+    if [[ "$kind" == common ]]; then
+        target_file="$PALWORLD_PROJECT_DIR/config/common.env"
+        backup_dir="$PALWORLD_PROJECT_DIR/backups/common"
+        backup_prefix=common
+        mode=0644
+        review_file="$PALWORLD_PROJECT_DIR/runtime/common-settings.reviewed.sha256"
+    else
+        target_file="$PALWORLD_PROJECT_DIR/config/$server.env"
+        backup_dir="$PALWORLD_PROJECT_DIR/backups/$server/env"
+        backup_prefix=env
+        mode=0600
+    fi
+    [[ -f "$target_file" && ! -L "$target_file" ]] || {
+        echo "오류: 저장 대상 env가 안전한 일반 파일이 아닙니다: $target_file" >&2
+        return 1
+    }
+    for safe_root in \
+        "$PALWORLD_PROJECT_DIR/config" \
+        "$PALWORLD_PROJECT_DIR/backups" \
+        "$PALWORLD_PROJECT_DIR/runtime"; do
+        [[ ! -L "$safe_root" && ( ! -e "$safe_root" || -d "$safe_root" ) ]] || {
+            echo "오류: env 저장 경로가 안전하지 않습니다: $safe_root" >&2
+            return 1
+        }
+    done
+    [[ ! -L "$backup_dir" && ( ! -e "$backup_dir" || -d "$backup_dir" ) ]] || {
+        echo "오류: env 백업 경로가 안전하지 않습니다: $backup_dir" >&2
+        return 1
+    }
+    [[ -z "$review_file" || ( ! -L "$review_file" && ( ! -e "$review_file" || -f "$review_file" ) ) ]] || {
+        echo "오류: Common Settings 확인 표식이 안전하지 않습니다: $review_file" >&2
+        return 1
+    }
+
+    local current_hash="" uid="" gid="" stamp="" backup_file="" replacement="" review_temporary=""
+    current_hash="$(sha256sum -- "$target_file" | awk '{print $1}')"
+    if [[ "$current_hash" != "$expected_hash" ]]; then
+        echo "오류: 편집기를 연 뒤 $kind env가 다른 작업에서 변경되었습니다. 최신 내용을 다시 열어 편집하세요." >&2
+        return 1
+    fi
+    uid="$(stat -c '%u' -- "$target_file")"
+    gid="$(stat -c '%g' -- "$target_file")"
+    stamp="$(date '+%Y.%m.%d-%H.%M.%S')"
+    install -d -m 0700 -o "$uid" -g "$gid" -- "$backup_dir"
+    backup_file="$(mktemp "$backup_dir/${backup_prefix}_${stamp}.XXXXXXXX.env")"
+    cp -p -- "$target_file" "$backup_file"
+    replacement="$(mktemp "$PALWORLD_PROJECT_DIR/config/.$(basename -- "$target_file").replace.XXXXXXXX")"
+    if ! install -m "$mode" -o "$uid" -g "$gid" -- "$source_file" "$replacement"; then
+        rm -f -- "$replacement"
+        return 1
+    fi
+    mv -f -- "$replacement" "$target_file"
+
+    if [[ "$kind" == common ]]; then
+        current_hash="$(sha256sum -- "$target_file" | awk '{print $1}')"
+        review_temporary="$(mktemp "$PALWORLD_PROJECT_DIR/runtime/.common-settings.reviewed.XXXXXXXX")"
+        printf '%s\n' "$current_hash" >"$review_temporary"
+        chown "$uid:$gid" "$review_temporary"
+        chmod 0644 "$review_temporary"
+        mv -f -- "$review_temporary" "$review_file"
+        printf 'PAL_COMMON_SAVED=%s\nPAL_COMMON_HASH=%s\n' "$backup_file" "$current_hash"
+    else
+        printf 'PAL_ENV_BACKUP=%s\n' "$backup_file"
+    fi
+}
+
+guarded_import_commit() {
+    local arguments=("$@") import_server="" index=0 server_count=0 argument=""
+    while (( index < ${#arguments[@]} )); do
+        argument="${arguments[$index]}"
+        if [[ "$argument" == --project || "$argument" == --project=* ]]; then
+            echo "오류: import-commit의 project 경로는 현재 등록 프로젝트로 고정됩니다." >&2
+            return 2
+        fi
+        if [[ "$argument" == --server && $((index + 1)) -lt ${#arguments[@]} ]]; then
+            import_server="${arguments[$((index + 1))]}"
+            ((server_count += 1))
+            ((index += 1))
+        elif [[ "$argument" == --server=* ]]; then
+            import_server="${argument#--server=}"
+            ((server_count += 1))
+        fi
+        ((index += 1))
+    done
+    (( server_count == 1 )) && validate_server_name "$import_server" \
+        || { echo "오류: import-commit에는 --server serverN을 정확히 한 번 지정해야 합니다." >&2; return 2; }
+    assert_root
+    require_python
+    assert_palworld_host_project_owner
+    acquire_palworld_project_operation_lock
+    python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" assert-server-ownership "$import_server"
+    python3 -B "$PALWORLD_INSTALL_DIR/scripts/import_existing.py" commit \
+        --project "$PALWORLD_PROJECT_DIR" "${arguments[@]}"
+}
+
+parse_guarded_world_action_arguments() {
+    local operation="$1"
+    shift
+    local arguments=("$@") argument="" server="" index=0 server_count=0
+    while (( index < ${#arguments[@]} )); do
+        argument="${arguments[$index]}"
+        case "$argument" in
+            --project|--project=*)
+                echo "오류: $operation 작업의 project 경로는 현재 등록 프로젝트로 고정됩니다." >&2
+                return 2
+                ;;
+            --server)
+                if (( index + 1 >= ${#arguments[@]} )); then
+                    echo "오류: $operation 작업에는 --server serverN이 필요합니다." >&2
+                    return 2
+                fi
+                server="${arguments[$((index + 1))]}"
+                ((server_count += 1))
+                ((index += 1))
+                ;;
+            --server=*)
+                server="${argument#--server=}"
+                ((server_count += 1))
+                ;;
+        esac
+        ((index += 1))
+    done
+    if (( server_count != 1 )) || ! validate_server_name "$server"; then
+        echo "오류: $operation 작업에는 --server serverN을 정확히 한 번 지정해야 합니다." >&2
+        return 2
+    fi
+    GUARDED_WORLD_ARGUMENTS=("${arguments[@]}")
+    GUARDED_WORLD_SERVER="$server"
+}
+
+guarded_import_tool() {
+    (( $# > 0 )) || { usage >&2; return 2; }
+    local subcommand="$1" arguments=("$@") supplied_project="" index=0 project_count=0 argument=""
+    case "$subcommand" in
+        discover|inspect|validate-ports|stop) ;;
+        *) echo "오류: 지원하지 않는 import-tool 명령입니다: $subcommand" >&2; return 2 ;;
+    esac
+    while (( index < ${#arguments[@]} )); do
+        argument="${arguments[$index]}"
+        if [[ "$argument" == --project && $((index + 1)) -lt ${#arguments[@]} ]]; then
+            supplied_project="${arguments[$((index + 1))]}"
+            ((project_count += 1))
+            ((index += 1))
+        elif [[ "$argument" == --project=* ]]; then
+            supplied_project="${argument#--project=}"
+            ((project_count += 1))
+        fi
+        ((index += 1))
+    done
+    if (( project_count > 0 )) && [[ -z "$supplied_project" ]]; then
+        echo "오류: import-tool의 --project 경로는 비어 있을 수 없습니다." >&2
+        return 2
+    fi
+    if [[ -n "$supplied_project" && "$supplied_project" != "$PALWORLD_PROJECT_DIR" ]]; then
+        echo "오류: import 작업의 project 경로가 현재 등록 프로젝트와 다릅니다." >&2
+        return 1
+    fi
+    if (( project_count > 1 )); then
+        echo "오류: import-tool의 --project는 한 번만 지정할 수 있습니다." >&2
+        return 2
+    fi
+    assert_root
+    require_python
+    assert_palworld_host_project_owner
+    if [[ "$subcommand" == inspect || "$subcommand" == stop ]]; then
+        acquire_palworld_project_operation_lock
+    fi
+    python3 -B "$PALWORLD_INSTALL_DIR/scripts/import_existing.py" "${arguments[@]}"
+}
+
+assert_root() {
+    if (( EUID != 0 )); then
+        echo "오류: 삭제 작업은 관리자 권한이 필요합니다. 설치 프로그램의 Remove 메뉴를 사용하세요." >&2
+        exit 1
+    fi
+}
+
+safe_remove_server_policy() {
+    local server="$1"
+    local runtime_root="$PALWORLD_PROJECT_DIR/runtime"
+    local policy_root="$runtime_root/policy"
+    local policy_target="$policy_root/$server"
+    validate_server_name "$server" || { echo "오류: 잘못된 서버 이름: $server" >&2; return 1; }
+    if [[ -L "$runtime_root" || -L "$policy_root" ]] \
+        || [[ -e "$runtime_root" && ! -d "$runtime_root" ]] \
+        || [[ -e "$policy_root" && ! -d "$policy_root" ]]; then
+        echo "오류: 운영 정책 삭제 경로 안전 검사 실패: $policy_root" >&2
+        return 1
+    fi
+    case "$policy_target" in
+        "$PALWORLD_PROJECT_DIR"/runtime/policy/server[1-9]*) ;;
+        *) echo "오류: 운영 정책 삭제 경로 안전 검사 실패: $policy_target" >&2; return 1 ;;
+    esac
+    rm -rf -- "$policy_target"
+}
+
+safe_remove_server_files() {
+    local server="$1"
+    local target="$PALWORLD_PROJECT_DIR/data/$server"
+    local backup_target="$PALWORLD_PROJECT_DIR/backups/$server"
+    validate_server_name "$server" || { echo "오류: 잘못된 서버 이름: $server" >&2; return 1; }
+    safe_remove_server_policy "$server"
+    case "$target" in
+        "$PALWORLD_PROJECT_DIR"/data/server[1-9]*) ;;
+        *) echo "오류: 삭제 경로 안전 검사 실패: $target" >&2; return 1 ;;
+    esac
+    rm -rf -- "$target"
+    case "$backup_target" in
+        "$PALWORLD_PROJECT_DIR"/backups/server[1-9]*) ;;
+        *) echo "오류: 백업 삭제 경로 안전 검사 실패: $backup_target" >&2; return 1 ;;
+    esac
+    rm -rf -- "$backup_target"
+    python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" remove-config "$server" >/dev/null
+}
+
+remove_docker_volume() {
+    local volume="$1"
+    local owner="" output="" detail="" attempt=0
+    if ! output="$(docker volume inspect --format '{{index .Labels "io.palworld.project-dir"}}' "$volume" 2>&1)"; then
+        detail="${output,,}"
+        if [[ "$detail" == *"no such"* || "$detail" == *"not found"* ]]; then
+            return 0
+        fi
+        echo "오류: Docker 볼륨 상태를 확인하지 못했습니다: $volume: $output" >&2
+        return 1
+    fi
+    owner="$output"
+    if [[ -n "$owner" && "$owner" != "<no value>" && "$owner" != "$PALWORLD_PROJECT_DIR" ]]; then
+        echo "오류: 다른 프로젝트 소유 Docker 볼륨은 제거하지 않습니다: $volume ($owner)" >&2
+        return 1
+    fi
+    while (( attempt < 3 )); do
+        output=""
+        if output="$(docker volume rm "$volume" 2>&1)"; then
+            return 0
+        fi
+        detail="${output,,}"
+        [[ "$detail" == *"no such"* || "$detail" == *"not found"* ]] && return 0
+        ((attempt += 1))
+        (( attempt >= 3 )) || sleep 1
+    done
+    echo "오류: Docker 볼륨을 제거하지 못했습니다: $volume: $output" >&2
+    return 1
+}
+
+remove_servers() {
+    assert_root
+    assert_palworld_host_project_owner
+    acquire_palworld_project_operation_lock
+    python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" ensure-template >/dev/null
+    local server container legacy_volume server_volume container_id="" inspect_status=0
+    local container_ids=() container_names=()
+    for server in "$@"; do
+        validate_server_name "$server" || { echo "오류: 잘못된 서버 이름: $server" >&2; exit 2; }
+        python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" assert-server-ownership "$server"
+        container="palworld-$server"
+        container_id=""
+        inspect_status=0
+        container_id="$(inspect_container_id_or_missing "$container")" || inspect_status=$?
+        if (( inspect_status != 0 && inspect_status != 3 )); then
+            return 1
+        fi
+        container_names+=("$container")
+        container_ids+=("$container_id")
+    done
+    local index=0 remove_output="" detail=""
+    for server in "$@"; do
+        container="${container_names[$index]}"
+        container_id="${container_ids[$index]}"
+        echo "$server 컨테이너와 데이터 제거"
+        if [[ -n "$container_id" ]]; then
+            if ! remove_output="$(docker rm -f "$container_id" 2>&1)"; then
+                detail="${remove_output,,}"
+                if [[ "$detail" != *"no such"* && "$detail" != *"not found"* ]]; then
+                    echo "오류: $server 컨테이너를 제거하지 못했습니다: $remove_output" >&2
+                    return 1
+                fi
+            fi
+        fi
+        legacy_volume="palworld-$server-data"
+        server_volume="palworld-$server-server"
+        remove_docker_volume "$legacy_volume"
+        remove_docker_volume "$server_volume"
+        container_id=""
+        inspect_status=0
+        container_id="$(inspect_container_id_or_missing "$container")" || inspect_status=$?
+        if (( inspect_status == 0 )); then
+            echo "오류: 제거 중 같은 이름의 컨테이너가 다시 생성되어 로컬 데이터를 보존했습니다: $container ($container_id)" >&2
+            return 1
+        elif (( inspect_status != 3 )); then
+            return 1
+        fi
+        safe_remove_server_files "$server"
+        echo "$server 제거 완료: 컨테이너, config/$server.env, data/$server, backups/$server, runtime/policy/$server, 서버 파일 볼륨"
+        ((index += 1))
+    done
+    generate_compose
+}
+
+remove_all_managed() {
+    assert_root
+    assert_palworld_host_project_owner
+    acquire_palworld_project_operation_lock
+    python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" ensure-template >/dev/null
+    refresh_servers
+    local managed_networks=() server container network project_label compose_project compose_network
+    local verified_image_id="" inspect_output="" inspect_status=0 detail="" network_output=""
+    local cleanup_failed=false
+    inspect_output=""
+    if inspect_output="$(docker image inspect --format '{{.Id}}' "$PALWORLD_IMAGE" 2>&1)"; then
+        verified_image_id="$inspect_output"
+        [[ "$verified_image_id" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "오류: 관리 이미지의 immutable ID 형식이 잘못되었습니다: $verified_image_id" >&2
+            return 1
+        }
+    else
+        detail="${inspect_output,,}"
+        if [[ "$detail" != *"no such"* && "$detail" != *"not found"* ]]; then
+            echo "오류: 관리 이미지 상태를 확인하지 못했습니다: $inspect_output" >&2
+            return 1
+        fi
+    fi
+    for server in "${SERVER_NAMES[@]}"; do
+        container="palworld-$server"
+        network_output=""
+        if ! network_output="$(docker inspect --format '{{range $name, $config := .NetworkSettings.Networks}}{{$name}}{{"\n"}}{{end}}' "$container" 2>&1)"; then
+            detail="${network_output,,}"
+            if [[ "$detail" == *"no such"* || "$detail" == *"not found"* ]]; then
+                continue
+            fi
+            echo "오류: $container 네트워크 연결을 조회하지 못했습니다: $network_output" >&2
+            return 1
+        fi
+        while IFS= read -r network; do
+            [[ -n "$network" ]] && managed_networks+=("$network")
+        done <<<"$network_output"
+    done
+    inspect_output=""
+    if inspect_output="$(docker network inspect --format '{{index .Labels "io.palworld.project-dir"}}' palworld_default 2>&1)"; then
+        if [[ "$inspect_output" == "$PALWORLD_PROJECT_DIR" ]]; then
+            managed_networks+=(palworld_default)
+        fi
+    else
+        detail="${inspect_output,,}"
+        if [[ "$detail" != *"no such"* && "$detail" != *"not found"* ]]; then
+            echo "오류: 관리 네트워크 상태를 확인하지 못했습니다: $inspect_output" >&2
+            return 1
+        fi
+    fi
+    if (( ${#SERVER_NAMES[@]} > 0 )); then
+        remove_servers "${SERVER_NAMES[@]}"
+    fi
+
+    local path base server volume legacy_volume server_volume
+    for path in "$PALWORLD_PROJECT_DIR"/config/server[0-9]*.env; do
+        [[ -e "$path" ]] || continue
+        base="$(basename -- "$path" .env)"
+        validate_server_name "$base" || continue
+        python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" assert-server-ownership "$base"
+        legacy_volume="palworld-$base-data"
+        server_volume="palworld-$base-server"
+        remove_docker_volume "$legacy_volume"
+        remove_docker_volume "$server_volume"
+        rm -f -- "$path"
+    done
+    for path in "$PALWORLD_PROJECT_DIR"/data/server[0-9]*; do
+        [[ -e "$path" ]] || continue
+        base="$(basename -- "$path")"
+        validate_server_name "$base" || continue
+        rm -rf -- "$path"
+    done
+    for path in "$PALWORLD_PROJECT_DIR"/backups/server[0-9]*; do
+        [[ -e "$path" || -L "$path" ]] || continue
+        base="$(basename -- "$path")"
+        validate_server_name "$base" || continue
+        case "$path" in
+            "$PALWORLD_PROJECT_DIR"/backups/server[1-9]*) rm -rf -- "$path" ;;
+            *) echo "오류: 백업 삭제 경로 안전 검사 실패: $path" >&2; return 1 ;;
+        esac
+    done
+    for path in "$PALWORLD_PROJECT_DIR"/runtime/policy/server[0-9]*; do
+        [[ -e "$path" || -L "$path" ]] || continue
+        base="$(basename -- "$path")"
+        validate_server_name "$base" || continue
+        safe_remove_server_policy "$base"
+    done
+    local volume_output=""
+    if ! volume_output="$(docker volume ls \
+        --filter "label=io.palworld.project-dir=$PALWORLD_PROJECT_DIR" \
+        --format '{{.Name}}')"; then
+        echo "오류: 관리 Docker 볼륨 목록을 조회하지 못했습니다." >&2
+        return 1
+    fi
+    while IFS= read -r volume; do
+        [[ "$volume" =~ ^palworld-server[1-9][0-9]*-(server|data)$ ]] || continue
+        remove_docker_volume "$volume"
+    done <<<"$volume_output"
+
+    local managed_image managed_image_id managed_image_target image_output=""
+    if ! image_output="$(docker image ls \
+        --no-trunc \
+        --filter label=io.palworld.image=palworld-dedicated-server \
+        --filter "label=io.palworld.project-dir=$PALWORLD_PROJECT_DIR" \
+        --format '{{.Repository}}:{{.Tag}}{{"\t"}}{{.ID}}')"; then
+        echo "오류: 관리 Docker 이미지 목록을 조회하지 못했습니다." >&2
+        return 1
+    fi
+    declare -A removed_image_ids=()
+    while IFS=$'\t' read -r managed_image managed_image_id; do
+        [[ -n "$managed_image_id" ]] || continue
+        [[ -z "${removed_image_ids[$managed_image_id]:-}" ]] || continue
+        removed_image_ids[$managed_image_id]=yes
+        # Remove every tag of this explicitly project-labelled immutable image.
+        # The ownership preflight already rejected unrelated container users.
+        managed_image_target="$managed_image_id"
+        inspect_output=""
+        if ! inspect_output="$(docker image rm -f "$managed_image_target" 2>&1)"; then
+            detail="${inspect_output,,}"
+            if [[ "$detail" != *"no such"* && "$detail" != *"not found"* ]]; then
+                echo "오류: 관리 Docker 이미지를 제거하지 못했습니다: $managed_image_target: $inspect_output" >&2
+                cleanup_failed=true
+            fi
+        fi
+    done <<<"$image_output"
+    # A verified pre-label image is safe only because assert-host-ownership
+    # proved that an owned container used this exact immutable ID. Capture it
+    # before container removal and clean it afterward; Docker keeps it if any
+    # external container began using it.
+    if [[ -n "$verified_image_id" \
+        && -z "${removed_image_ids[$verified_image_id]:-}" ]]; then
+        inspect_output=""
+        if ! inspect_output="$(docker image rm "$verified_image_id" 2>&1)"; then
+            detail="${inspect_output,,}"
+            if [[ "$detail" != *"no such"* && "$detail" != *"not found"* ]]; then
+                echo "오류: 관리 Docker 이미지를 제거하지 못했습니다: $verified_image_id: $inspect_output" >&2
+                cleanup_failed=true
+            fi
+        fi
+    fi
+    declare -A removed_networks=()
+    for network in "${managed_networks[@]}"; do
+        case "$network" in bridge|host|none|"") continue ;; esac
+        [[ -z "${removed_networks[$network]:-}" ]] || continue
+        removed_networks[$network]=yes
+        inspect_output=""
+        if ! inspect_output="$(docker network inspect --format '{{index .Labels "io.palworld.project-dir"}}' "$network" 2>&1)"; then
+            detail="${inspect_output,,}"
+            if [[ "$detail" == *"no such"* || "$detail" == *"not found"* ]]; then
+                continue
+            fi
+            echo "오류: 관리 Docker 네트워크 소유권을 다시 확인하지 못했습니다: $network: $inspect_output" >&2
+            cleanup_failed=true
+            continue
+        fi
+        project_label="$inspect_output"
+        if [[ "$project_label" != "$PALWORLD_PROJECT_DIR" ]]; then
+            # Older releases did not add the project-dir label. The exact
+            # Compose default network attached to a verified managed container
+            # is the only legacy fallback; foreign/custom networks are kept.
+            [[ -z "$project_label" || "$project_label" == "<no value>" ]] || continue
+            if ! compose_project="$(docker network inspect --format '{{index .Labels "com.docker.compose.project"}}' "$network" 2>&1)" \
+                || ! compose_network="$(docker network inspect --format '{{index .Labels "com.docker.compose.network"}}' "$network" 2>&1)"; then
+                echo "오류: legacy Docker 네트워크 label을 확인하지 못했습니다: $network" >&2
+                cleanup_failed=true
+                continue
+            fi
+            [[ "$network" == palworld_default \
+                && "$compose_project" == palworld \
+                && "$compose_network" == default ]] || continue
+        fi
+        inspect_output=""
+        if ! inspect_output="$(docker network rm "$network" 2>&1)"; then
+            detail="${inspect_output,,}"
+            if [[ "$detail" != *"no such"* && "$detail" != *"not found"* ]]; then
+                echo "오류: 관리 Docker 네트워크를 제거하지 못했습니다: $network: $inspect_output" >&2
+                cleanup_failed=true
+            fi
+        fi
+    done
+    if [[ "$cleanup_failed" == true ]]; then
+        echo "오류: Docker 정리가 완료되지 않아 프로젝트 등록과 관리 디렉터리를 보존했습니다. 문제를 해결한 뒤 Remove를 다시 실행하세요." >&2
+        return 1
+    fi
+    rm -f -- "$PALWORLD_COMPOSE_FILE"
+    echo "전체 서버 제거 완료: 컨테이너, 서버 설정, Saved 데이터, 백업, 운영 정책, 서버 파일 볼륨, 전용 이미지와 네트워크"
+    echo "유지 항목: Docker Engine/Compose, 공용 시스템 패키지, 시간대와 docker 그룹 설정, 관리 디렉터리"
+}
+
+validate_project_delete_path() {
+    local target="$1"
+    local original_home=""
+    [[ -n "$target" && "$target" == /* ]] || return 1
+    case "$target" in
+        /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var) return 1 ;;
+    esac
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != root ]]; then
+        original_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+        [[ -z "$original_home" || "$target" != "$original_home" ]] || return 1
+    fi
+    [[ "$target" != "${HOME:-}" ]] || return 1
+    [[ -f "$target/.palworld-server-operations-project" \
+        && ! -L "$target/.palworld-server-operations-project" \
+        && "$(cat -- "$target/.palworld-server-operations-project")" == "palworld-server-operations-project-v1" \
+        && -f "$PALWORLD_INSTALL_DIR/Dockerfile" \
+        && -f "$PALWORLD_INSTALL_DIR/manager" \
+        && -f "$PALWORLD_INSTALL_DIR/scripts/instances.py" \
+        && -f "$target/config/common.env" \
+        && -f "$target/operate/pal" ]]
+}
+
+remove_project_directory() {
+    assert_root
+    assert_palworld_host_project_owner
+    acquire_palworld_project_operation_lock
+    local target="$PALWORLD_PROJECT_DIR"
+    validate_project_delete_path "$target" || { echo "오류: 프로젝트 경로 안전 검사 실패: $target" >&2; exit 1; }
+    remove_all_managed
+    local parent="$(dirname -- "$target")"
+    # Release the root-owned host registration only after Docker cleanup has
+    # succeeded, but before deleting the project files needed for ownership
+    # revalidation and a safe retry.
+    release_palworld_host_project_registration
+    cd /
+    rm -rf -- \
+        "$target/config" \
+        "$target/data" \
+        "$target/backups" \
+        "$target/operate" \
+        "$target/runtime"
+    rm -f -- \
+        "$target/.palworld-server-operations-project" \
+        "$target/LICENSE" \
+        "$target/README.md" \
+        "$target/OPERATIONS.md" \
+        "$target/BUILD.md" \
+        "$target/PROJECT_CONTEXT.md" \
+        "$target/CONTRIBUTING.md" \
+        "$target/PalworldServerInstaller.run"
+    if rmdir -- "$target" 2>/dev/null; then
+        echo "관리 디렉터리 삭제 완료: $target"
+    else
+        echo "[WARN] 프로젝트 파일은 삭제했지만 프로젝트 외 파일이 남아 디렉터리는 보존했습니다: $target" >&2
+    fi
+    echo "Docker Engine/Compose와 공용 시스템 설정은 유지됐습니다."
+    echo "현재 위치로 돌아갈 때 사용: cd $parent"
+}
+
+setup_menu() {
+    while true; do
+        echo
+        print_servers
+        cat <<'EOF'
+
+  1. 신규 서버 설치 및 시작
+  Q. 뒤로가기
+EOF
+        read -r -p "선택 [1, Q]: " choice
+        case "$choice" in
+            1)
+                # setup.sh chooses under the project operation lock. This also
+                # resumes an incomplete config-only install instead of burning
+                # a new server number on every retry.
+                run_setup --next
+                ;;
+            q|Q) return ;;
+            *) echo "잘못된 선택입니다." >&2 ;;
+        esac
+    done
+}
+
+update_server_menu() {
+    while true; do
+        local selected_index selected_server
+        echo
+        print_configured_servers
+        if (( ${#CONFIGURED_SERVER_NAMES[@]} == 0 )); then
+            echo "  Q. 뒤로가기"
+            read -r -p "선택 [Q]: " selected_index
+            is_quit_choice "$selected_index" && return
+            echo "Q를 입력하세요." >&2
+            continue
+        fi
+        echo "  Q. 뒤로가기"
+        read -r -p "갱신할 서버 번호: " selected_index
+        if is_quit_choice "$selected_index"; then
+            return
+        elif [[ "$selected_index" =~ ^[0-9]+$ ]] \
+            && (( selected_index >= 1 && selected_index <= ${#CONFIGURED_SERVER_NAMES[@]} )); then
+            selected_server="${CONFIGURED_SERVER_NAMES[$((selected_index - 1))]}"
+            echo "$selected_server: 월드와 서버 파일 볼륨을 보존하고 이미지·mount·설정을 갱신합니다."
+            run_setup --server "$selected_server"
+        else
+            echo "서버 번호 하나를 선택하세요." >&2
+        fi
+    done
+}
+
+reset_world_menu() {
+    require_python || return
+    while true; do
+        local selected_index selected_server confirm
+        echo
+        print_servers
+        if (( ${#SERVER_NAMES[@]} == 0 )); then
+            echo "  Q. 뒤로가기"
+            read -r -p "선택 [Q]: " selected_index
+            is_quit_choice "$selected_index" && return
+            echo "Q를 입력하세요." >&2
+            continue
+        fi
+        echo "  Q. 뒤로가기"
+        read -r -p "초기화할 서버 번호: " selected_index
+        if is_quit_choice "$selected_index"; then
+            return
+        elif [[ "$selected_index" =~ ^[0-9]+$ ]] \
+            && (( selected_index >= 1 && selected_index <= ${#SERVER_NAMES[@]} )); then
+            selected_server="${SERVER_NAMES[$((selected_index - 1))]}"
+            echo
+            echo "경고: $selected_server 월드와 Saved 설정을 새 상태로 초기화합니다."
+            echo "백업: backups/$selected_server/reset_날짜시간/{world,logs,config,metadata.json}"
+            echo "유지: config/$selected_server.env, Docker 컨테이너·이미지·서버 파일 볼륨"
+            read -r -p "계속하려면 RESET $selected_server 입력: " confirm
+            if [[ "$confirm" == "RESET $selected_server" ]]; then
+                run_privileged_manager reset --server "$selected_server"
+            else
+                echo "취소했습니다."
+            fi
+        else
+            echo "서버 번호 하나를 선택하세요." >&2
+        fi
+    done
+}
+
+restore_world_menu() {
+    require_python || return
+    while true; do
+        local selected_index selected_server
+        echo
+        print_servers
+        if (( ${#SERVER_NAMES[@]} == 0 )); then
+            echo "  Q. 뒤로가기"
+            read -r -p "선택 [Q]: " selected_index
+            is_quit_choice "$selected_index" && return
+            echo "Q를 입력하세요." >&2
+            continue
+        fi
+        echo "  Q. 뒤로가기"
+        read -r -p "복원할 서버 번호: " selected_index
+        if is_quit_choice "$selected_index"; then
+            return
+        elif [[ "$selected_index" =~ ^[0-9]+$ ]] \
+            && (( selected_index >= 1 && selected_index <= ${#SERVER_NAMES[@]} )); then
+            selected_server="${SERVER_NAMES[$((selected_index - 1))]}"
+            # Route the interactive menu through the same privileged CLI path
+            # so ownership and the project-wide operation lock cannot be bypassed.
+            run_privileged_manager restore --server "$selected_server" --wait 60 || true
+        else
+            echo "서버 번호 하나를 선택하세요." >&2
+        fi
+    done
+}
+
+access_token_menu() {
+    require_python || return
+    while true; do
+        local selected_index selected_server action confirm
+        echo
+        print_configured_servers
+        if (( ${#CONFIGURED_SERVER_NAMES[@]} == 0 )); then
+            echo "  Q. 뒤로가기"
+            read -r -p "선택 [Q]: " selected_index
+            is_quit_choice "$selected_index" && return
+            echo "Q를 입력하세요." >&2
+            continue
+        fi
+        echo "  Q. 뒤로가기"
+        read -r -p "토큰을 관리할 서버 번호: " selected_index
+        if is_quit_choice "$selected_index"; then
+            return
+        elif [[ "$selected_index" =~ ^[0-9]+$ ]] \
+            && (( selected_index >= 1 && selected_index <= ${#CONFIGURED_SERVER_NAMES[@]} )); then
+            selected_server="${CONFIGURED_SERVER_NAMES[$((selected_index - 1))]}"
+        else
+            echo "서버 번호 하나를 선택하세요." >&2
+            continue
+        fi
+        while true; do
+            cat <<EOF
+
+$selected_server API access token
+
+  1. 현재 토큰 확인
+  2. 새 토큰 발급 및 적용
+  Q. 뒤로가기
+EOF
+            read -r -p "선택 [1-2, Q]: " action
+            case "$action" in
+                1)
+                    run_privileged_manager token --server "$selected_server" --show
+                    ;;
+                2)
+                    echo "경고: 기존 토큰은 즉시 폐기되고 해당 컨테이너 설정이 재적용됩니다."
+                    read -r -p "계속하려면 ROTATE $selected_server 입력: " confirm
+                    if [[ "$confirm" == "ROTATE $selected_server" ]]; then
+                        run_privileged_manager token --server "$selected_server" --rotate
+                    else
+                        echo "취소했습니다."
+                    fi
+                    ;;
+                q|Q) break ;;
+                *) echo "잘못된 선택입니다." >&2 ;;
+            esac
+        done
+    done
+}
+
+manage_menu() {
+    while true; do
+        cat <<'EOF'
+
+Manage
+
+  1. 기존 서버 이미지 갱신·설정 재적용
+  2. 서버 월드 초기화
+  3. 서버 월드 복원
+  4. API access token 확인·재발급
+  Q. 뒤로가기
+EOF
+        read -r -p "선택 [1-4, Q]: " choice
+        case "$choice" in
+            1)
+                update_server_menu
+                ;;
+            2) reset_world_menu ;;
+            3) restore_world_menu ;;
+            4) access_token_menu ;;
+            q|Q) return ;;
+            *) echo "잘못된 선택입니다." >&2 ;;
+        esac
+    done
+}
+
+test_menu() {
+    require_python || return
+    while true; do
+        echo
+        print_servers
+        if (( ${#SERVER_NAMES[@]} == 0 )); then
+            echo "  Q. 뒤로가기"
+            read -r -p "선택 [Q]: " choice
+            is_quit_choice "$choice" && return
+            echo "Q를 입력하세요." >&2
+            continue
+        fi
+        local all_choice=$(( ${#SERVER_NAMES[@]} + 1 ))
+        echo "  $all_choice. 전체 검사"
+        echo "  Q. 뒤로가기"
+        echo "여러 서버 선택: 1,3 또는 1, 3"
+        read -r -p "검사 대상: " choice
+        compact="${choice//[[:space:]]/}"
+        if is_quit_choice "$compact"; then
+            return
+        elif [[ "$compact" == "$all_choice" ]]; then
+            run_test --server all || true
+        elif parse_server_indexes "$choice"; then
+            run_test --server "$(join_servers "${SELECTED_SERVERS[@]}")" || true
+        else
+            echo "잘못된 선택입니다." >&2
+        fi
+    done
+}
+
+remove_menu() {
+    require_python || return
+    while true; do
+        echo
+        print_servers
+        local all_choice=$(( ${#SERVER_NAMES[@]} + 1 ))
+        local project_choice=$(( ${#SERVER_NAMES[@]} + 2 ))
+        echo "  $all_choice. 모든 서버와 데이터 제거 (관리 디렉터리 유지)"
+        echo "  $project_choice. 전체 제거 후 palworld-docker 관리 디렉터리까지 삭제"
+        echo "  Q. 뒤로가기"
+        if (( ${#SERVER_NAMES[@]} > 0 )); then
+            echo "여러 서버 선택: 1,3 또는 1, 3"
+        fi
+        read -r -p "삭제 대상: " choice
+        compact="${choice//[[:space:]]/}"
+        if is_quit_choice "$compact"; then
+            return
+        elif [[ "$compact" == "$all_choice" ]]; then
+            read -r -p "모든 서버와 월드 데이터를 삭제합니다. DELETE 입력: " confirm
+            [[ "$confirm" == DELETE ]] && run_privileged_manager remove --all || echo "취소했습니다."
+        elif [[ "$compact" == "$project_choice" ]]; then
+            echo "삭제 경로: $PALWORLD_PROJECT_DIR"
+            read -r -p "Docker를 제외한 모든 서버와 이 디렉터리를 삭제합니다. DELETE PROJECT 입력: " confirm
+            if [[ "$confirm" == "DELETE PROJECT" ]]; then
+                run_privileged_manager remove --project
+                exit 0
+            else
+                echo "취소했습니다."
+            fi
+        elif (( ${#SERVER_NAMES[@]} > 0 )) && parse_server_indexes "$choice"; then
+            echo "삭제 서버: $(join_servers "${SELECTED_SERVERS[@]}")"
+            read -r -p "컨테이너, 설정, 월드/서버 데이터를 삭제합니다. DELETE 입력: " confirm
+            [[ "$confirm" == DELETE ]] && run_privileged_manager remove --servers "$(join_servers "${SELECTED_SERVERS[@]}")" || echo "취소했습니다."
+        else
+            echo "잘못된 선택입니다." >&2
+        fi
+    done
+}
+
+if (( $# > 0 )); then
+    command="$1"
+    shift
+    case "$command" in
+        prepare)
+            run_setup --prepare-only "$@"
+            ;;
+        prepare-scaffold) prepare_project_scaffold "$@" ;;
+        setup)
+            if [[ " ${*:-} " == *" --server "* ]]; then
+                run_setup "$@"
+            else
+                run_setup --next "$@"
+            fi
+            ;;
+        update)
+            [[ " ${*:-} " == *" --server "* ]] || { usage >&2; exit 2; }
+            run_setup "$@"
+            ;;
+        test)
+            require_python
+            run_test "$@"
+            ;;
+        list)
+            require_python
+            python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" list "$@"
+            ;;
+        reset)
+            parse_guarded_world_action_arguments reset "$@"
+            assert_root
+            require_python
+            assert_palworld_host_project_owner
+            acquire_palworld_project_operation_lock
+            python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" \
+                assert-server-ownership "$GUARDED_WORLD_SERVER"
+            python3 -B "$PALWORLD_INSTALL_DIR/scripts/reset_world.py" \
+                --project "$PALWORLD_PROJECT_DIR" "${GUARDED_WORLD_ARGUMENTS[@]}"
+            ;;
+        restore)
+            parse_guarded_world_action_arguments restore "$@"
+            require_python
+            assert_palworld_host_project_owner
+            acquire_palworld_project_operation_lock
+            python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" \
+                assert-server-ownership "$GUARDED_WORLD_SERVER"
+            python3 -B "$PALWORLD_INSTALL_DIR/scripts/restore_world.py" \
+                --project "$PALWORLD_PROJECT_DIR" "${GUARDED_WORLD_ARGUMENTS[@]}"
+            ;;
+        token) manage_server_token "$@" ;;
+        write-env) write_managed_env "$@" ;;
+        host-time) apply_guarded_host_time "$@" ;;
+        import-commit) guarded_import_commit "$@" ;;
+        import-tool) guarded_import_tool "$@" ;;
+        remove)
+            case "${1:-}" in
+                --all) remove_all_managed ;;
+                --project) remove_project_directory ;;
+                --servers)
+                    [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+                    IFS=',' read -r -a selected <<<"${2//[[:space:]]/}"
+                    remove_servers "${selected[@]}"
+                    ;;
+                *) usage >&2; exit 2 ;;
+            esac
+            ;;
+        -h|--help|help) usage ;;
+        *) usage >&2; exit 2 ;;
+    esac
+    exit 0
+fi
+
+while true; do
+    cat <<'EOF'
+
+팰월드 서버 관리자
+
+  1. Setup  - 신규 서버 설치 및 시작
+  2. Manage - 서버 갱신, 월드 초기화·복원 또는 API token 관리
+  3. Test   - 설치된 서버 선택 검사
+  4. Remove - 개별 서버, 전체 서버 또는 관리 디렉터리 제거
+  Q. Exit
+EOF
+    read -r -p "선택 [1-4, Q]: " menu
+    case "$menu" in
+        1) setup_menu ;;
+        2) manage_menu ;;
+        3) test_menu ;;
+        4) remove_menu ;;
+        q|Q) exit 0 ;;
+        *) echo "잘못된 선택입니다." >&2 ;;
+    esac
+done

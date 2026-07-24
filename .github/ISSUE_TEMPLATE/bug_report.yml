@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a reproducible problem without including deployment secrets.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. Remove passwords, API tokens, private
+        keys, public IP addresses, hostnames, world data, and connection files
+        from every field and attachment. Use the private security-reporting flow for vulnerabilities.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Palworld Server Operations - Admin
+        - Palworld Server Operations - Client
+        - Linux installer (.run)
+        - Container runtime / API
+        - Documentation or build
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: Release tag, EXE file version, or commit hash
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Sanitized environment
+      description: Windows version, Linux distribution, architecture, and relevant network topology without private identifiers.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: Include the exact tab, action, and selected server, but redact all secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and sanitized logs
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private deployment identifiers, world data, and connection-store files.
+          required: true
+        - label: This is not a security vulnerability requiring private disclosure.
+          required: true

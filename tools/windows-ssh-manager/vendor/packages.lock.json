@@ -1,0 +1,392 @@
+{
+  "target": "net462",
+  "packages": [
+    {
+      "id": "SSH.NET",
+      "version": "2025.1.0",
+      "source": "https://api.nuget.org/v3-flatcontainer/ssh.net/2025.1.0/ssh.net.2025.1.0.nupkg",
+      "package_sha256": "beda6f13907e231a0c92af4240c7a1a11e5946d8a16874385728669242232fdf",
+      "license": "MIT",
+      "authors": "Renci",
+      "copyright": "Copyright \u00a9 Renci 2010-2025",
+      "legal_documents": [
+        {
+          "file": "package metadata + SPDX MIT text",
+          "sha256": "9c6b6e0619edacc5891236a91fc18887a6a8e12ca7ca896e2b654fad36425c23"
+        }
+      ],
+      "dependencies": [
+        {
+          "id": "BouncyCastle.Cryptography",
+          "version": "2.6.2"
+        },
+        {
+          "id": "Microsoft.Extensions.Logging.Abstractions",
+          "version": "8.0.3"
+        },
+        {
+          "id": "System.Formats.Asn1",
+          "version": "8.0.2"
+        }
+      ],
+      "assemblies": [
+        {
+          "file": "Renci.SshNet.dll",
+          "sha256": "748a696dd6fb276e403c071061f35c75e799b428ea853e0b6096a92041364664",
+          "size": 525312
+        }
+      ]
+    },
+    {
+      "id": "BouncyCastle.Cryptography",
+      "version": "2.6.2",
+      "source": "https://api.nuget.org/v3-flatcontainer/bouncycastle.cryptography/2.6.2/bouncycastle.cryptography.2.6.2.nupkg",
+      "package_sha256": "623936fb1fd171579c706390390711282898cf2c759a5167852e5ab82208f8cb",
+      "license": "MIT",
+      "authors": "Legion of the Bouncy Castle Inc.",
+      "copyright": "Copyright \u00a9 Legion of the Bouncy Castle Inc. 2000-2025",
+      "legal_documents": [
+        {
+          "file": "LICENSE.md",
+          "sha256": "afc1653b666b64a2386b7b9b914406904f45c20b9571765d8c1121b513313179"
+        }
+      ],
+      "dependencies": [],
+      "assemblies": [
+        {
+          "file": "BouncyCastle.Cryptography.dll",
+          "sha256": "d9a58c84baa55a12684cd2381bca03c8f2a9cbae21a6bf1e9ebd65f495629721",
+          "size": 4694688
+        }
+      ]
+    },
+    {
+      "id": "Microsoft.Extensions.Logging.Abstractions",
+      "version": "8.0.3",
+      "source": "https://api.nuget.org/v3-flatcontainer/microsoft.extensions.logging.abstractions/8.0.3/microsoft.extensions.logging.abstractions.8.0.3.nupkg",
+      "package_sha256": "e4c498d5a13051b4577a148f1d8c3470167215c507e2392069b75dc61322bb74",
+      "license": "MIT",
+      "authors": "Microsoft",
+      "copyright": "\u00a9 Microsoft Corporation. All rights reserved.",
+      "legal_documents": [
+        {
+          "file": "LICENSE.TXT",
+          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+        },
+        {
+          "file": "THIRD-PARTY-NOTICES.TXT",
+          "sha256": "b60b2912da28eaa6518593c9e2efb5334ee062d3c42e80d8fdfa806b3dc52977"
+        }
+      ],
+      "dependencies": [
+        {
+          "id": "Microsoft.Extensions.DependencyInjection.Abstractions",
+          "version": "8.0.2"
+        },
+        {
+          "id": "System.Buffers",
+          "version": "4.5.1"
+        },
+        {
+          "id": "System.Memory",
+          "version": "4.5.5"
+        }
+      ],
+      "assemblies": [
+        {
+          "file": "Microsoft.Extensions.Logging.Abstractions.dll",
+          "sha256": "b4e0e778afdc76403792390b056f68de0ced742d16c5b0347d9cca6930f4761b",
+          "size": 67856
+        }
+      ]
+    },
+    {
+      "id": "System.Formats.Asn1",
+      "version": "8.0.2",
+      "source": "https://api.nuget.org/v3-flatcontainer/system.formats.asn1/8.0.2/system.formats.asn1.8.0.2.nupkg",
+      "package_sha256": "4d5a09377f5cb02cdad97b732c4278cd38acf420b91453793aabc8c213e438df",
+      "license": "MIT",
+      "authors": "Microsoft",
+      "copyright": "\u00a9 Microsoft Corporation. All rights reserved.",
+      "legal_documents": [
+        {
+          "file": "LICENSE.TXT",
+          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+        },
+        {
+          "file": "THIRD-PARTY-NOTICES.TXT",
+          "sha256": "b60b2912da28eaa6518593c9e2efb5334ee062d3c42e80d8fdfa806b3dc52977"
+        }
+      ],
+      "dependencies": [
+        {
+          "id": "System.Buffers",
+          "version": "4.5.1"
+        },
+        {
+          "id": "System.Memory",
+          "version": "4.5.5"
+        },
+        {
+          "id": "System.ValueTuple",
+          "version": "4.5.0"
+        }
+      ],
+      "assemblies": [
+        {
+          "file": "System.Formats.Asn1.dll",
+          "sha256": "7781e1b4a1a583554158f2d9298778d62fa5790eed56f09e6cc895d0daa455ba",
+          "size": 105224
+        }
+      ]
+    },
+    {
+      "id": "Microsoft.Extensions.DependencyInjection.Abstractions",
+      "version": "8.0.2",
+      "source": "https://api.nuget.org/v3-flatcontainer/microsoft.extensions.dependencyinjection.abstractions/8.0.2/microsoft.extensions.dependencyinjection.abstractions.8.0.2.nupkg",
+      "package_sha256": "51f2df1100245f10da54f0bb7e813f277155117777d4fbbab902214e27372606",
+      "license": "MIT",
+      "authors": "Microsoft",
+      "copyright": "\u00a9 Microsoft Corporation. All rights reserved.",
+      "legal_documents": [
+        {
+          "file": "LICENSE.TXT",
+          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+        },
+        {
+          "file": "THIRD-PARTY-NOTICES.TXT",
+          "sha256": "b60b2912da28eaa6518593c9e2efb5334ee062d3c42e80d8fdfa806b3dc52977"
+        }
+      ],
+      "dependencies": [
+        {
+          "id": "Microsoft.Bcl.AsyncInterfaces",
+          "version": "8.0.0"
+        },
+        {
+          "id": "System.Threading.Tasks.Extensions",
+          "version": "4.5.4"
+        }
+      ],
+      "assemblies": [
+        {
+          "file": "Microsoft.Extensions.DependencyInjection.Abstractions.dll",
+          "sha256": "19edd4f5e69a4589dc314909b5854a22f89c4b9ab040591771397b2cb1a17ba6",
+          "size": 63784
+        }
+      ]
+    },
+    {
+      "id": "System.Buffers",
+      "version": "4.5.1",
+      "source": "https://api.nuget.org/v3-flatcontainer/system.buffers/4.5.1/system.buffers.4.5.1.nupkg",
+      "package_sha256": "c30b3dd2c7e2f4cee4b823d692fd42118309b42ab1f5007f923d329a5b0d6b12",
+      "license": "https://github.com/dotnet/corefx/blob/master/LICENSE.TXT",
+      "authors": "Microsoft",
+      "copyright": "\u00a9 Microsoft Corporation. All rights reserved.",
+      "legal_documents": [
+        {
+          "file": "LICENSE.TXT",
+          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+        },
+        {
+          "file": "THIRD-PARTY-NOTICES.TXT",
+          "sha256": "7864a01e2fdef7e8fdf81b906efb1466f083206affea7ba7e6dadea429754765"
+        }
+      ],
+      "dependencies": [],
+      "assemblies": [
+        {
+          "file": "System.Buffers.dll",
+          "sha256": "accccfbe45d9f08ffeed9916e37b33e98c65be012cfff6e7fa7b67210ce1fefb",
+          "size": 20856
+        }
+      ]
+    },
+    {
+      "id": "System.Memory",
+      "version": "4.5.5",
+      "source": "https://api.nuget.org/v3-flatcontainer/system.memory/4.5.5/system.memory.4.5.5.nupkg",
+      "package_sha256": "10f43da352a29fb2b3188e4edd4dcf5100194c8b526e4f61fe2e2b5623775a22",
+      "license": "https://github.com/dotnet/corefx/blob/master/LICENSE.TXT",
+      "authors": "Microsoft",
+      "copyright": "\u00a9 Microsoft Corporation. All rights reserved.",
+      "legal_documents": [
+        {
+          "file": "LICENSE.TXT",
+          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+        },
+        {
+          "file": "THIRD-PARTY-NOTICES.TXT",
+          "sha256": "7864a01e2fdef7e8fdf81b906efb1466f083206affea7ba7e6dadea429754765"
+        }
+      ],
+      "dependencies": [
+        {
+          "id": "System.Buffers",
+          "version": "4.5.1"
+        },
+        {
+          "id": "System.Numerics.Vectors",
+          "version": "4.5.0"
+        },
+        {
+          "id": "System.Runtime.CompilerServices.Unsafe",
+          "version": "4.5.3"
+        }
+      ],
+      "assemblies": [
+        {
+          "file": "System.Memory.dll",
+          "sha256": "bf3fb84664f4097f1a8a9bc71a51dcf8cf1a905d4080a4d290da1730866e856f",
+          "size": 142240
+        }
+      ]
+    },
+    {
+      "id": "System.ValueTuple",
+      "version": "4.5.0",
+      "source": "https://api.nuget.org/v3-flatcontainer/system.valuetuple/4.5.0/system.valuetuple.4.5.0.nupkg",
+      "package_sha256": "9e21fa9767d4e76bc0cee065c1d40cc34384a114bfec4d70e6c981168a926802",
+      "license": "https://github.com/dotnet/corefx/blob/master/LICENSE.TXT",
+      "authors": "Microsoft",
+      "copyright": "\u00a9 Microsoft Corporation.  All rights reserved.",
+      "legal_documents": [
+        {
+          "file": "LICENSE.TXT",
+          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+        },
+        {
+          "file": "THIRD-PARTY-NOTICES.TXT",
+          "sha256": "7864a01e2fdef7e8fdf81b906efb1466f083206affea7ba7e6dadea429754765"
+        }
+      ],
+      "dependencies": [],
+      "assemblies": [
+        {
+          "file": "System.ValueTuple.dll",
+          "sha256": "e4774aead2793f440e0ced6c097048423d118e0b6ed238c6fe5b456acb07817f",
+          "size": 78992
+        }
+      ]
+    },
+    {
+      "id": "Microsoft.Bcl.AsyncInterfaces",
+      "version": "8.0.0",
+      "source": "https://api.nuget.org/v3-flatcontainer/microsoft.bcl.asyncinterfaces/8.0.0/microsoft.bcl.asyncinterfaces.8.0.0.nupkg",
+      "package_sha256": "f5a5a68b03092ab2abf68843d4a4aea25dfbcbe8dd0f13c625cb779b6fc1927c",
+      "license": "MIT",
+      "authors": "Microsoft",
+      "copyright": "\u00a9 Microsoft Corporation. All rights reserved.",
+      "legal_documents": [
+        {
+          "file": "LICENSE.TXT",
+          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+        },
+        {
+          "file": "THIRD-PARTY-NOTICES.TXT",
+          "sha256": "19c19dcac9f3ee6302cfbc6745bb8e79f08efc4c933eb8dc5509bf14b88347ec"
+        }
+      ],
+      "dependencies": [
+        {
+          "id": "System.Threading.Tasks.Extensions",
+          "version": "4.5.4"
+        }
+      ],
+      "assemblies": [
+        {
+          "file": "Microsoft.Bcl.AsyncInterfaces.dll",
+          "sha256": "80678203bd0203a6594f4e330b22543c0de5059382bb1c9334b7868b8f31b1bc",
+          "size": 26904
+        }
+      ]
+    },
+    {
+      "id": "System.Threading.Tasks.Extensions",
+      "version": "4.5.4",
+      "source": "https://api.nuget.org/v3-flatcontainer/system.threading.tasks.extensions/4.5.4/system.threading.tasks.extensions.4.5.4.nupkg",
+      "package_sha256": "a304a963cc0796c5179f9c6b7d8022bbce3b2fa7c029eb6196f631f7b462d678",
+      "license": "https://github.com/dotnet/corefx/blob/master/LICENSE.TXT",
+      "authors": "Microsoft",
+      "copyright": "\u00a9 Microsoft Corporation. All rights reserved.",
+      "legal_documents": [
+        {
+          "file": "LICENSE.TXT",
+          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+        },
+        {
+          "file": "THIRD-PARTY-NOTICES.TXT",
+          "sha256": "7864a01e2fdef7e8fdf81b906efb1466f083206affea7ba7e6dadea429754765"
+        }
+      ],
+      "dependencies": [
+        {
+          "id": "System.Runtime.CompilerServices.Unsafe",
+          "version": "4.5.3"
+        }
+      ],
+      "assemblies": [
+        {
+          "file": "System.Threading.Tasks.Extensions.dll",
+          "sha256": "4f81ffd0dc7204db75afc35ea4291769b07c440592f28894260eea76626a23c6",
+          "size": 25984
+        }
+      ]
+    },
+    {
+      "id": "System.Numerics.Vectors",
+      "version": "4.5.0",
+      "source": "https://api.nuget.org/v3-flatcontainer/system.numerics.vectors/4.5.0/system.numerics.vectors.4.5.0.nupkg",
+      "package_sha256": "a9d49320581fda1b4f4be6212c68c01a22cdf228026099c20a8eabefcf90f9cf",
+      "license": "https://github.com/dotnet/corefx/blob/master/LICENSE.TXT",
+      "authors": "Microsoft",
+      "copyright": "\u00a9 Microsoft Corporation.  All rights reserved.",
+      "legal_documents": [
+        {
+          "file": "LICENSE.TXT",
+          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+        },
+        {
+          "file": "THIRD-PARTY-NOTICES.TXT",
+          "sha256": "7864a01e2fdef7e8fdf81b906efb1466f083206affea7ba7e6dadea429754765"
+        }
+      ],
+      "dependencies": [],
+      "assemblies": [
+        {
+          "file": "System.Numerics.Vectors.dll",
+          "sha256": "1d3ef8698281e7cf7371d1554afef5872b39f96c26da772210a33da041ba1183",
+          "size": 115856
+        }
+      ]
+    },
+    {
+      "id": "System.Runtime.CompilerServices.Unsafe",
+      "version": "4.5.3",
+      "source": "https://api.nuget.org/v3-flatcontainer/system.runtime.compilerservices.unsafe/4.5.3/system.runtime.compilerservices.unsafe.4.5.3.nupkg",
+      "package_sha256": "96764c52a44ee1161151e48ef07489f72047a851cb55b99e9f01d6908536d1a9",
+      "license": "https://github.com/dotnet/corefx/blob/master/LICENSE.TXT",
+      "authors": "Microsoft",
+      "copyright": "\u00a9 Microsoft Corporation. All rights reserved.",
+      "legal_documents": [
+        {
+          "file": "LICENSE.TXT",
+          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+        },
+        {
+          "file": "THIRD-PARTY-NOTICES.TXT",
+          "sha256": "7864a01e2fdef7e8fdf81b906efb1466f083206affea7ba7e6dadea429754765"
+        }
+      ],
+      "dependencies": [],
+      "assemblies": [
+        {
+          "file": "System.Runtime.CompilerServices.Unsafe.dll",
+          "sha256": "66409f670315afe8610f17a4d3a1ee52d72b6a46c544cec97544e8385f90ad74",
+          "size": 16768
+        }
+      ]
+    }
+  ]
+}
