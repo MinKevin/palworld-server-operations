@@ -3,8 +3,8 @@
   "payloads": {
     "setup": {
       "file": "setup.tar.gz",
-      "size": 143893,
-      "sha256": "0923abcdaa2e2f309a4b6f97435a6516d1de3a88e097d3653253335a2b9f1e28",
+      "size": 143909,
+      "sha256": "229ef5c310f1716bb055e45460c908b0b938bf3ad5ed4d44feb1c37f238ac585",
       "entries": [
         "install/Dockerfile",
         "install/lib.sh",
@@ -35,7 +35,7 @@
         {
           "entry": "install/Dockerfile",
           "path": "install/Dockerfile",
-          "sha256": "fd49878bd105701ee6ce055c2e665dd61cdf4d6db28ba4574a38aa7ebaaeb0d0"
+          "sha256": "63d75ea261169f9b6e3f24ad33f7d848a5d5812cf395d4b7194deabc2d4ee974"
         },
         {
           "entry": "install/lib.sh",
@@ -195,8 +195,8 @@
     },
     "manage": {
       "file": "manage.tar.gz",
-      "size": 110151,
-      "sha256": "d957daf78b99a9cc5083de73c55af749d814201656a6da06ddbb2fceda68941d",
+      "size": 110164,
+      "sha256": "4ac7c900bf9f01f39a61ddb622d9113654f63704b88e9134bafdf813f4d074fc",
       "entries": [
         "install/Dockerfile",
         "install/lib.sh",
@@ -218,7 +218,7 @@
         {
           "entry": "install/Dockerfile",
           "path": "install/Dockerfile",
-          "sha256": "fd49878bd105701ee6ce055c2e665dd61cdf4d6db28ba4574a38aa7ebaaeb0d0"
+          "sha256": "63d75ea261169f9b6e3f24ad33f7d848a5d5812cf395d4b7194deabc2d4ee974"
         },
         {
           "entry": "install/lib.sh",
