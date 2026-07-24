@@ -2,6 +2,12 @@
   <img src="tools/windows-client/assets/palworld-server-operations.png" width="128" alt="Palworld Server Operations 아이콘">
 </p>
 
+> [!NOTE]
+> 버전 1.0.0은 첫 공개 릴리스입니다. 주요 기능은 Ubuntu 22.04 호스트를
+> 중심으로 테스트했지만, 하드웨어·네트워크·기존 서버 구성에 따라 예상하지
+> 못한 문제가 발생할 수 있습니다. Setup, Import, Restore, Remove를 사용하기
+> 전에 중요한 월드 데이터의 별도 백업을 보관하세요.
+
 # Palworld Server Operations
 
 [English](README.md) | 한국어
