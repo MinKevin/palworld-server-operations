@@ -2,6 +2,12 @@
   <img src="tools/windows-client/assets/palworld-server-operations.png" width="128" alt="Palworld Server Operations icon">
 </p>
 
+> [!NOTE]
+> Version 0.1.0 is the first public release. The main workflows have been
+> tested primarily with Ubuntu 22.04 hosts, but hardware, network, and existing
+> server configurations can vary. Keep an independent backup of important world
+> data before using setup, import, restore, or removal operations.
+
 # Palworld Server Operations
 
 English | [한국어](README.ko.md)
