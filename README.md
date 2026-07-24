@@ -3,7 +3,7 @@
 </p>
 
 > [!NOTE]
-> Version 0.1.0 is the first public release. The main workflows have been
+> Version 1.0.0 is the first public release. The main workflows have been
 > tested primarily with Ubuntu 22.04 hosts, but hardware, network, and existing
 > server configurations can vary. Keep an independent backup of important world
 > data before using setup, import, restore, or removal operations.
