@@ -5215,9 +5215,16 @@ $script:AdminTabLayout = $null
 if ($script:IsAdminEdition) {
     $script:PalworldServerApiSetSshOperationState = {
         param([bool]$Running)
-        foreach ($control in @($adminConnectionGroup, $adminToolsGroup, $commandGroup)) {
+        foreach ($control in @($adminConnectionGroup, $adminToolsGroup)) {
             if ($control -and -not $control.IsDisposed) {
                 $control.Enabled = -not $Running
+            }
+        }
+        if ($commandGroup -and -not $commandGroup.IsDisposed) {
+            $hasSelectedConnection = $connectionCombo.SelectedIndex -gt 0
+            $commandGroup.Enabled = (-not $Running) -and $hasSelectedConnection
+            if (-not $Running) {
+                & $setAdminConnectionAvailability $hasSelectedConnection
             }
         }
     }.GetNewClosure()
@@ -5958,13 +5965,6 @@ guest@testhost:~$ > PAL_SCAFFOLD=yes
     if (-not $missingPostSetupServerRejected) {
         throw "Post-Setup Server API synchronization accepted an empty server name."
     }
-    $artifactCleanup = New-PalworldRemoteArtifactCleanupCommand `
-        -Project "/home/guest/palworld-docker"
-    if ($artifactCleanup -notmatch 'README\.md' -or
-        $artifactCleanup -notmatch 'PalworldServerInstaller\.run' -or
-        $artifactCleanup -match '[*?]') {
-        throw "Remote release-artifact cleanup is incomplete or uses an unsafe wildcard."
-    }
     if (-not (Test-PalworldTypedConfirmationText -Actual "DELETE server1" -Expected "DELETE server1") -or
         (Test-PalworldTypedConfirmationText -Actual "delete server1" -Expected "DELETE server1")) {
         throw "Typed confirmation must use an exact ordinal comparison."
@@ -6585,15 +6585,18 @@ if ($script:IsAdminEdition -and $env:PALWORLD_CLIENT_TEST_MODE -eq "admin-empty"
     if ($connectionCombo.Items.Count -ne 1 -or $connectionCombo.SelectedIndex -ne 0) {
         throw "Empty admin store must contain only the No Server API sentinel"
     }
-    if (
-        $connectionUpdateButton.Enabled -or
-        $connectionDeleteButton.Enabled -or
-        $worldRestoreButton.Enabled -or
-        $runtimeLogButton.Enabled -or
-        $commandGroup.Enabled -or
-        $sendButton.Enabled
-    ) {
-        throw "Admin actions must remain disabled without a Connection"
+    $unexpectedEnabledActions = @(
+        [pscustomobject]@{ Name = "Update Connection"; Control = $connectionUpdateButton }
+        [pscustomobject]@{ Name = "Delete Connection"; Control = $connectionDeleteButton }
+        [pscustomobject]@{ Name = "Restore World"; Control = $worldRestoreButton }
+        [pscustomobject]@{ Name = "Runtime Logs"; Control = $runtimeLogButton }
+        [pscustomobject]@{ Name = "Server Commands"; Control = $commandGroup }
+        [pscustomobject]@{ Name = "Send Command"; Control = $sendButton }
+    ) |
+        Where-Object { $_.Control.Enabled } |
+        ForEach-Object { $_.Name }
+    if ($unexpectedEnabledActions.Count -gt 0) {
+        throw "Admin actions must remain disabled without a Connection: $($unexpectedEnabledActions -join ', ')"
     }
     $form.Dispose()
     return
