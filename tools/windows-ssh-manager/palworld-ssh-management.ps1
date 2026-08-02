@@ -1836,7 +1836,9 @@ function Invoke-PalworldSshOrphanCleanup {
         $cleanup = @'
 for d in $(find /tmp -regextype posix-extended -maxdepth 1 -type d -regex '/tmp/palworld-ssh-manager-[a-f0-9]{32}-(setup|test|manage)' -print); do [ -f "$d/.palworld-ssh-session" ] || continue; if find "$d/.palworld-ssh-session" -mmin +60 -print -quit | grep -q .; then rm -rf -- "$d"; fi; done
 '@.Trim()
-        $cleanupCommand = $Client.CreateCommand($cleanup)
+        $cleanupCommand = $Client.CreateCommand(
+            (ConvertTo-PalworldUnixShellText -Command $cleanup)
+        )
         $cleanupCommand.CommandTimeout = [TimeSpan]::FromSeconds(5)
         $task = $cleanupCommand.ExecuteAsync($cancellation.Token)
         $cancelCommand = { $cleanupCommand.CancelAsync($true, 100) }.GetNewClosure()
@@ -2129,11 +2131,21 @@ function Reset-PalworldAutomationShellStream {
     }
 }
 
+function ConvertTo-PalworldUnixShellText {
+    param([Parameter(Mandatory = $true)][string]$Command)
+    # PowerShell here-strings inherit the Windows source file's CRLF endings.
+    # Bash treats the retained carriage return in commands such as `set -eu`
+    # as part of the option text, so normalize every remote script to Unix LF
+    # before handing it to either SSH execution channel.
+    return $Command.Replace("`r`n", "`n").Replace("`r", "`n")
+}
+
 function ConvertTo-PalworldShellExecutionCommand {
     param([Parameter(Mandatory = $true)][string]$Command)
-    if ($Command -notmatch '[\r\n]') { return $Command }
+    $normalizedCommand = ConvertTo-PalworldUnixShellText -Command $Command
+    if ($normalizedCommand -notmatch "`n") { return $normalizedCommand }
     $encoding = New-Object System.Text.UTF8Encoding -ArgumentList $false, $true
-    $bytes = $encoding.GetBytes($Command)
+    $bytes = $encoding.GetBytes($normalizedCommand)
     try { $encoded = [Convert]::ToBase64String($bytes) }
     finally { [Array]::Clear($bytes, 0, $bytes.Length) }
     # Keep the interactive PTY stdin attached to bash so sudo -S can read the
@@ -2602,7 +2614,8 @@ function Invoke-PalworldSshSimpleCommand {
     $task = $null
     $deferredCleanup = $false
     try {
-        $sshCommand = $script:PalworldSshClient.CreateCommand($Command)
+        $normalizedCommand = ConvertTo-PalworldUnixShellText -Command $Command
+        $sshCommand = $script:PalworldSshClient.CreateCommand($normalizedCommand)
         $sshCommand.CommandTimeout = [TimeSpan]::FromSeconds($TimeoutSeconds)
         $task = $sshCommand.ExecuteAsync($cancellation.Token)
         $cancelCommand = { $sshCommand.CancelAsync($true, 100) }.GetNewClosure()

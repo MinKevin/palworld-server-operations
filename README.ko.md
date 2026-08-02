@@ -393,6 +393,8 @@ python -B tools/build_linux_installer.py
 python -B -m unittest discover -s tests -v
 powershell -NoProfile -ExecutionPolicy Bypass `
   -File tools/windows-client/build-exe.ps1
+python -B tools/release_checksums.py --write
+python -B tools/release_checksums.py
 Remove-Item Env:PYTHONDONTWRITEBYTECODE
 ```
 

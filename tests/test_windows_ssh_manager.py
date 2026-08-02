@@ -419,6 +419,52 @@ class WindowsSshManagerTests(unittest.TestCase):
         self.assertIn('-Command "__PALWORLD_SUDO__ -k true"', source)
         self.assertIn("sent unchanged as UTF-8 but sudo rejected it", source)
 
+    def test_multiline_ssh_commands_are_normalized_to_unix_line_endings(self) -> None:
+        source = SSH_SOURCE.read_text("utf-8")
+        normalization = re.search(
+            r"function ConvertTo-PalworldUnixShellText \{(.*?)\n\}",
+            source,
+            flags=re.DOTALL,
+        )
+        conversion = re.search(
+            r"function ConvertTo-PalworldShellExecutionCommand \{(.*?)\n\}",
+            source,
+            flags=re.DOTALL,
+        )
+        simple_command = re.search(
+            r"function Invoke-PalworldSshSimpleCommand \{(.*?)\n\}",
+            source,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(normalization)
+        self.assertIsNotNone(conversion)
+        self.assertIsNotNone(simple_command)
+        self.assertIn(
+            '$Command.Replace("`r`n", "`n").Replace("`r", "`n")',
+            normalization.group(1),
+        )
+        self.assertIn(
+            "ConvertTo-PalworldUnixShellText -Command $Command",
+            conversion.group(1),
+        )
+        self.assertIn(
+            "$encoding.GetBytes($normalizedCommand)",
+            conversion.group(1),
+        )
+        self.assertNotIn("$encoding.GetBytes($Command)", conversion.group(1))
+        self.assertIn(
+            "ConvertTo-PalworldUnixShellText -Command $Command",
+            simple_command.group(1),
+        )
+        self.assertIn(
+            "$script:PalworldSshClient.CreateCommand($normalizedCommand)",
+            simple_command.group(1),
+        )
+        self.assertNotIn(
+            "$script:PalworldSshClient.CreateCommand($Command)",
+            simple_command.group(1),
+        )
+
     def test_host_check_directory_creation_and_setup_prerequisites_are_separated(self) -> None:
         source = SSH_SOURCE.read_text("utf-8")
         host_check = re.search(
