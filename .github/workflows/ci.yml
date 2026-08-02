@@ -148,6 +148,10 @@ jobs:
             -Edition Admin `
             -ExePath "windows/Palworld Server Operations - Admin.exe"
 
+      - name: Verify release artifact checksums
+        shell: pwsh
+        run: python -B tools/release_checksums.py
+
       - name: Build portable Windows executables
         shell: powershell
         run: |
