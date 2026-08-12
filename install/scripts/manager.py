@@ -68,6 +68,7 @@ UPDATE_LOCK_FILE = Path(
 UPDATE_LOCK_RETRY_SECONDS = 15.0
 STEAM_BUILD_CACHE_SECONDS = 60.0
 STEAM_APP_INFO_TIMEOUT_SECONDS = 90.0
+STEAM_DISTRIBUTION_RETRY_SECONDS = 30 * 60.0
 STATUS_WRITE_ERROR_LOG_INTERVAL_SECONDS = 60.0
 SCHEDULED_RESTART_MIN_UPTIME = 60.0
 STEAMCMD_STALLED_EXIT_CODE = 124
@@ -110,6 +111,14 @@ _RUNTIME_LOG_SESSIONS = 0
 class UpdateLockState:
     acquired: bool
     error: str | None = None
+
+
+class SteamUpdateDeferredError(RuntimeError):
+    """A Steam-side download refusal that must not take an intact server offline."""
+
+    def __init__(self, message: str, *, return_code: int) -> None:
+        super().__init__(message)
+        self.return_code = return_code
 
 
 @contextmanager
@@ -769,6 +778,13 @@ def parse_installed_build_id(content: str) -> int:
     return int(match.group(1))
 
 
+def parse_app_manifest_state_flags(content: str) -> int:
+    match = re.search(r'"StateFlags"\s*"(\d+)"', content, re.IGNORECASE)
+    if not match:
+        raise ValueError("Steam app manifest does not contain valid StateFlags")
+    return int(match.group(1))
+
+
 def installed_build_id(manifest: Path | None = None) -> int:
     candidates = (
         (manifest,)
@@ -986,6 +1002,18 @@ _STEAMCMD_APP_STATE_ERROR_RE = re.compile(
     r"Error!\s+App\s+'[^']+'\s+state\s+is\s+(0x[0-9a-f]+)\s+after update job",
     re.IGNORECASE,
 )
+_STEAMCMD_MISSING_CONFIGURATION_RE = re.compile(
+    r"Failed to install app\s+'[^']+'\s+\(Missing configuration\)",
+    re.IGNORECASE,
+)
+_STEAMCMD_MANIFEST_ACCESS_DENIED_RE = re.compile(
+    r"Failed to get manifest request code,\s*'Access Denied'",
+    re.IGNORECASE,
+)
+_STEAMCMD_DEPOT_LICENSE_RE = re.compile(
+    r"missing license for depot|No subscription",
+    re.IGNORECASE,
+)
 
 
 def steamcmd_progress_signature(line: str) -> tuple[object, ...] | None:
@@ -1019,7 +1047,137 @@ def steamcmd_error_diagnostic(line: str) -> str | None:
             "Docker-volume space, a write failure, or stale app metadata; storage details "
             "are logged above and the operation will retry in a new SteamCMD session."
         )
-    return f"SteamCMD reported application state {state}; the operation will retry."
+    return (
+        f"SteamCMD reported application state {state}; Steam content diagnostics "
+        "will determine whether an immediate retry is safe."
+    )
+
+
+def steamcmd_distribution_failure(output: str, content_log: str = "") -> str | None:
+    """Classify Steam-side app/depot access failures that leave old files usable."""
+    combined = f"{output}\n{content_log}"
+    if _STEAMCMD_MANIFEST_ACCESS_DENIED_RE.search(combined):
+        return (
+            "Steam denied the anonymous session access to a depot manifest required "
+            f"for app {APP_ID} (Access Denied)"
+        )
+    if _STEAMCMD_DEPOT_LICENSE_RE.search(combined):
+        return (
+            "Steam did not grant the anonymous session the depot subscription required "
+            f"for app {APP_ID} (No subscription)"
+        )
+    if _STEAMCMD_MISSING_CONFIGURATION_RE.search(combined):
+        return (
+            "Steam did not provide an install configuration for the anonymous session "
+            f"for app {APP_ID} (Missing configuration)"
+        )
+    return None
+
+
+def steamcmd_stale_manifest_access_denied(output: str, content_log: str = "") -> bool:
+    """Return whether Steam rejected a depot manifest referenced by this install."""
+    combined = f"{output}\n{content_log}".lower()
+    return (
+        "manifest request code" in combined
+        and "access denied" in combined
+    )
+
+
+def steam_manifest_recovery_path() -> Path:
+    """Return the persistent backup used while resetting stale Steam app state."""
+    return (
+        POLICY_FILE.parent
+        / "update-recovery"
+        / f"appmanifest_{APP_ID}.acf.before-stale-reset"
+    )
+
+
+def reset_stale_steam_manifest() -> Path:
+    """Back up and remove a valid manifest so SteamCMD can fetch current depot state."""
+    # Refuse to quarantine an invalid manifest: it cannot prove which complete
+    # build should be restored if the clean SteamCMD attempt also fails.
+    installed_build_id(APP_MANIFEST)
+    recovery = steam_manifest_recovery_path()
+    recovery.parent.mkdir(parents=True, exist_ok=True)
+    temporary = recovery.with_name(f".{recovery.name}.{os.getpid()}.tmp")
+    try:
+        shutil.copy2(APP_MANIFEST, temporary)
+        os.replace(temporary, recovery)
+        APP_MANIFEST.unlink()
+    finally:
+        temporary.unlink(missing_ok=True)
+    return recovery
+
+
+def restore_stale_steam_manifest(recovery: Path) -> None:
+    """Atomically restore the known-good manifest after an interrupted/failed reset."""
+    if not recovery.is_file():
+        return
+    APP_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
+    temporary = APP_MANIFEST.with_name(f".{APP_MANIFEST.name}.{os.getpid()}.restore")
+    try:
+        shutil.copy2(recovery, temporary)
+        os.replace(temporary, APP_MANIFEST)
+        recovery.unlink()
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def recover_interrupted_steam_manifest_reset() -> None:
+    """Roll back a manifest reset left unfinished by process or host termination."""
+    recovery = steam_manifest_recovery_path()
+    try:
+        recovery_exists = recovery.is_file()
+    except OSError as error:
+        log(f"Steam manifest recovery backup cannot be inspected: {error}")
+        return
+    if recovery_exists:
+        try:
+            current_manifest = APP_MANIFEST.read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+            current_complete = (
+                parse_app_manifest_state_flags(current_manifest) == 4
+                and not missing_required_game_files()
+            )
+        except (OSError, ValueError):
+            current_complete = False
+        if current_complete:
+            recovery.unlink()
+            log(
+                "completed Steam app manifest found after an interrupted recovery; "
+                "discarded the obsolete pre-update manifest backup"
+            )
+            return
+        restore_stale_steam_manifest(recovery)
+        log("restored Steam app manifest from an interrupted stale-state recovery")
+
+
+def steam_content_log_path() -> Path:
+    """Return the Steam client content log used by the packaged SteamCMD wrapper."""
+    return Path.home() / "Steam/logs/content_log.txt"
+
+
+def file_size_or_zero(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def read_log_since(path: Path, previous_size: int, *, limit: int = 512 * 1024) -> str:
+    """Read newly appended diagnostics, tolerating Steam truncating its log first."""
+    try:
+        current_size = path.stat().st_size
+        offset = previous_size if current_size >= previous_size else 0
+        if current_size - offset > limit:
+            offset = current_size - limit
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            return handle.read(limit).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def _stop_logged_process(process: subprocess.Popen[str]) -> None:
@@ -1051,6 +1209,7 @@ def run_logged_command(
     *,
     source: str,
     progress_timeout: float | None = None,
+    captured_output: list[str] | None = None,
 ) -> int:
     process = subprocess.Popen(
         command,
@@ -1103,6 +1262,10 @@ def run_logged_command(
         line = str(record).rstrip("\r\n")
         if not line:
             continue
+        if captured_output is not None:
+            captured_output.append(line)
+            if len(captured_output) > 1000:
+                del captured_output[: len(captured_output) - 1000]
         log(line, source=source)
         diagnostic = steamcmd_error_diagnostic(line)
         if diagnostic:
@@ -1134,6 +1297,7 @@ def run_logged_command(
 
 
 def install_or_update(*, force_update: bool = False, update_lock_held: bool = False) -> None:
+    recover_interrupted_steam_manifest_reset()
     should_update = force_update or parse_bool(os.getenv("UPDATE_ON_START"), True)
     missing_before = missing_required_game_files()
     if not missing_before and not should_update:
@@ -1197,51 +1361,112 @@ def install_or_update(*, force_update: bool = False, update_lock_held: bool = Fa
             parse_duration(os.getenv("STEAMCMD_PROGRESS_TIMEOUT", "5m")),
         )
         attempts = 3
-        for attempt in range(1, attempts + 1):
-            log(f"SteamCMD attempt {attempt}/{attempts}")
-            return_code = run_logged_command(
-                command,
-                source="update",
-                progress_timeout=progress_timeout,
-            )
-            missing_after = missing_required_game_files() if return_code == 0 else ()
-            if return_code == 0 and not missing_after:
-                return
+        manifest_recovery: Path | None = None
+        try:
+            for attempt in range(1, attempts + 1):
+                log(f"SteamCMD attempt {attempt}/{attempts}")
+                content_log = steam_content_log_path()
+                content_log_offset = file_size_or_zero(content_log)
+                captured_output: list[str] = []
+                return_code = run_logged_command(
+                    command,
+                    source="update",
+                    progress_timeout=progress_timeout,
+                    captured_output=captured_output,
+                )
+                missing_after = missing_required_game_files() if return_code == 0 else ()
+                if return_code == 0 and not missing_after:
+                    if manifest_recovery is not None:
+                        manifest_recovery.unlink(missing_ok=True)
+                        manifest_recovery = None
+                        log(
+                            "SteamCMD stale-manifest recovery completed; the current app "
+                            "manifest is now authoritative"
+                        )
+                    return
 
-            if missing_after:
-                missing_names = ", ".join(
-                    str(path.relative_to(GAME_DIR)) for path in missing_after
+                output_text = "\n".join(captured_output)
+                content_text = read_log_since(content_log, content_log_offset)
+                distribution_failure = steamcmd_distribution_failure(
+                    output_text,
+                    content_text,
                 )
-                if attempt == attempts:
-                    raise FileNotFoundError(
-                        "SteamCMD completed successfully, but required game files are still missing: "
-                        f"{missing_names}"
+                if (
+                    distribution_failure
+                    and manifest_recovery is None
+                    and APP_MANIFEST.is_file()
+                    and steamcmd_stale_manifest_access_denied(output_text, content_text)
+                ):
+                    if storage.free < STEAMCMD_LOW_FREE_SPACE_BYTES:
+                        log(
+                            "Steam rejected the installed depot manifest, but fewer than "
+                            "12 GiB are free; preserving the installed build instead of "
+                            "starting a clean manifest recovery"
+                        )
+                    else:
+                        try:
+                            previous_build = installed_build_id(APP_MANIFEST)
+                            manifest_recovery = reset_stale_steam_manifest()
+                        except (OSError, RuntimeError, ValueError) as recovery_error:
+                            log(
+                                "Steam stale-manifest recovery could not be prepared; "
+                                f"the installed build remains preserved: {recovery_error}"
+                            )
+                        else:
+                            log(
+                                "Steam denied the historical depot manifest for installed "
+                                f"build {previous_build}; quarantined only the app manifest "
+                                "and retrying against the current depot metadata"
+                            )
+                            time.sleep(1)
+                            continue
+                if distribution_failure:
+                    raise SteamUpdateDeferredError(
+                        distribution_failure,
+                        return_code=return_code,
                     )
-                log(
-                    "SteamCMD completed but required game files are still missing "
-                    f"({missing_names}); retrying validation ({attempt}/{attempts - 1})"
-                )
+
+                if missing_after:
+                    missing_names = ", ".join(
+                        str(path.relative_to(GAME_DIR)) for path in missing_after
+                    )
+                    if attempt == attempts:
+                        raise FileNotFoundError(
+                            "SteamCMD completed successfully, but required game files are still missing: "
+                            f"{missing_names}"
+                        )
+                    log(
+                        "SteamCMD completed but required game files are still missing "
+                        f"({missing_names}); retrying validation ({attempt}/{attempts - 1})"
+                    )
+                    time.sleep(5)
+                    continue
+                if return_code == STEAMCMD_STALLED_EXIT_CODE and attempt == attempts:
+                    raise TimeoutError(
+                        "SteamCMD made no measurable progress for "
+                        f"{progress_timeout:g}s in each of {attempts} attempts; "
+                        "check Docker-volume free space and the container's Steam network access"
+                    )
+                if attempt == attempts:
+                    raise subprocess.CalledProcessError(return_code, command)
+                if return_code == STEAMCMD_STALLED_EXIT_CODE:
+                    log(
+                        "SteamCMD progress stalled; retrying with a new SteamCMD session "
+                        f"({attempt}/{attempts - 1})"
+                    )
+                else:
+                    log(
+                        f"SteamCMD failed with exit code {return_code}; "
+                        f"retrying ({attempt}/{attempts - 1})"
+                    )
                 time.sleep(5)
-                continue
-            if return_code == STEAMCMD_STALLED_EXIT_CODE and attempt == attempts:
-                raise TimeoutError(
-                    "SteamCMD made no measurable progress for "
-                    f"{progress_timeout:g}s in each of {attempts} attempts; "
-                    "check Docker-volume free space and the container's Steam network access"
-                )
-            if attempt == attempts:
-                raise subprocess.CalledProcessError(return_code, command)
-            if return_code == STEAMCMD_STALLED_EXIT_CODE:
+        finally:
+            if manifest_recovery is not None:
+                restore_stale_steam_manifest(manifest_recovery)
                 log(
-                    "SteamCMD progress stalled; retrying with a new SteamCMD session "
-                    f"({attempt}/{attempts - 1})"
+                    "Steam stale-manifest recovery did not complete; restored the "
+                    "known-good installed app manifest"
                 )
-            else:
-                log(
-                    f"SteamCMD failed with exit code {return_code}; "
-                    f"retrying ({attempt}/{attempts - 1})"
-                )
-            time.sleep(5)
 
     if update_lock_held:
         run_update()
@@ -1533,7 +1758,8 @@ class Supervisor:
         policy_record = self.policy_record(now)
         desired, desired_reason = self.desired_state(now, policy_record)
         test_session_active = self.test_session_active()
-        running = self.proc is not None and self.proc.poll() is None
+        process = getattr(self, "proc", None)
+        running = process is not None and process.poll() is None
         uptime = (
             max(0.0, time.monotonic() - self.last_started_monotonic)
             if running and self.last_started_monotonic is not None
@@ -1944,35 +2170,92 @@ class Supervisor:
             final_action=final_action,
         )
 
-    def restart_server(self, reason: str, waittime: int | None = None) -> bool:
-        if self.disruptive_action_blocked_by_policy("game restart"):
+    def start_or_restart_server(
+        self,
+        reason: str,
+        *,
+        restart: bool,
+        waittime: int | None = None,
+    ) -> bool:
+        """Run the shared managed start path used by Advanced Start and Restart."""
+        action = "game restart" if restart else "game start"
+        if self.disruptive_action_blocked_by_policy(action):
             return False
+
+        process = getattr(self, "proc", None)
+        running = process is not None and process.poll() is None
+        if running and not restart:
+            log("manual start requested while the game server is already running; no action needed")
+            return True
+
         waittime = self.restart_warning_seconds if waittime is None else max(0, waittime)
         if parse_bool(os.getenv("UPDATE_ON_START"), True):
-            if self.update_required_before_game_start(
+            # Manual/scheduled managed starts deliberately run SteamCMD instead
+            # of trusting only the lightweight BuildID comparison. SteamCMD is
+            # the final authority for whether the installed app needs changes.
+            self.perform_update(
+                f"SteamCMD pre-start check: {reason}",
+                waittime=waittime if running else 0,
+                restart_announcement=running,
+            )
+            return True
+
+        if running:
+            warning = render_timed_message(self.restart_warning_message, waittime)
+            if not self.stop_server(
                 reason,
                 waittime=waittime,
-                restart_announcement=True,
-                force_refresh=True,
+                message=warning,
+                countdown_message=self.restart_countdown_message,
+                final_message=FINAL_RESTART_MESSAGE,
+                require_graceful=True,
             ):
-                return True
-        warning = render_timed_message(self.restart_warning_message, waittime)
-        stopped = self.stop_server(
+                return False
+
+        desired, desired_reason = self.desired_state(datetime.now().astimezone())
+        if desired:
+            self.start_server(reason, update_before_start=False)
+        else:
+            self.phase = "stopped"
+            self.reason = desired_reason
+        return True
+
+    def restart_server(self, reason: str, waittime: int | None = None) -> bool:
+        return self.start_or_restart_server(
             reason,
+            restart=True,
             waittime=waittime,
-            message=warning,
-            countdown_message=self.restart_countdown_message,
-            final_message=FINAL_RESTART_MESSAGE,
-            require_graceful=True,
         )
-        if stopped:
-            desired, desired_reason = self.desired_state(datetime.now().astimezone())
-            if desired:
-                self.start_server(reason, update_before_start=False)
-            else:
-                self.phase = "stopped"
-                self.reason = desired_reason
-        return stopped
+
+    def execute_advanced_action(
+        self,
+        action: str,
+        *,
+        waittime: int,
+    ) -> bool:
+        """Apply policy and execute the common Advanced Start/Restart/Shutdown flow."""
+        now = datetime.now().astimezone()
+        if action == "start":
+            if not self.apply_start_request_policy(now):
+                return False
+            self.reason = "manual start requested"
+            return self.start_or_restart_server(
+                self.reason,
+                restart=False,
+                waittime=0,
+            )
+        if action == "restart":
+            if not self.apply_start_request_policy(now):
+                return False
+            return self.restart_server("manual restart requested", waittime=waittime)
+        if action == "shutdown":
+            if not self.shutdown_server(
+                "manual safe shutdown requested",
+                waittime=waittime,
+            ):
+                return False
+            return self.apply_shutdown_request_policy(now)
+        raise ValueError(f"unsupported advanced action: {action!r}")
 
     def perform_update(
         self,
@@ -2082,6 +2365,56 @@ class Supervisor:
                 if desired:
                     self.start_server(
                         f"update completed; {desired_reason}",
+                        update_before_start=False,
+                    )
+            except SteamUpdateDeferredError as error:
+                # Steam sometimes publishes a BuildID before the anonymous
+                # dedicated-server subscription can download every required
+                # manifest. Keep the last complete build available instead of
+                # converting a publishing outage into game-server downtime.
+                self.update_blocked = False
+                self.phase = "update-deferred"
+                self.reason = "Steam update deferred; using the installed build"
+                self.last_update_error = str(error)
+                deferred_retry = max(
+                    self.update_retry_interval,
+                    STEAM_DISTRIBUTION_RETRY_SECONDS,
+                )
+                self.next_update_check_monotonic = time.monotonic() + deferred_retry
+                try:
+                    self.installed_build = installed_build_id()
+                except RuntimeError as build_error:
+                    self.installed_build = None
+                    self.update_blocked = True
+                    self.phase = "update-failed"
+                    self.reason = f"update failed and installed build is unavailable: {build_error}"
+                    self.last_update_error = self.reason
+                    log(
+                        "Steam download was deferred, but the installed build could not be "
+                        f"verified; game remains stopped: {build_error}"
+                    )
+                    return
+                try:
+                    prepare_game_files()
+                except Exception as prepare_error:
+                    self.update_blocked = True
+                    self.phase = "update-failed"
+                    self.reason = f"installed build preparation failed: {prepare_error}"
+                    self.last_update_error = self.reason
+                    log(
+                        "Steam download was deferred and the installed build could not be "
+                        f"prepared; game remains stopped: {prepare_error}"
+                    )
+                    return
+                log(
+                    "Steam update deferred because the anonymous download is unavailable; "
+                    f"installed build {self.installed_build} remains intact and automatic "
+                    f"retry is scheduled in {deferred_retry:g}s: {error}"
+                )
+                desired, desired_reason = self.desired_state(datetime.now().astimezone())
+                if desired and not self.terminate_requested:
+                    self.start_server(
+                        f"Steam update deferred; {desired_reason}",
                         update_before_start=False,
                     )
             except Exception as error:
@@ -2376,11 +2709,9 @@ class Supervisor:
                 )
                 waittime = int(command.get("waittime", default_waittime))
                 if action == "start":
-                    if self.apply_start_request_policy(datetime.now().astimezone()):
-                        self.reason = "manual start requested"
+                    self.execute_advanced_action("start", waittime=0)
                 elif action in {"stop", "shutdown"}:
-                    if self.shutdown_server("manual safe shutdown requested", waittime=waittime):
-                        self.apply_shutdown_request_policy(datetime.now().astimezone())
+                    self.execute_advanced_action("shutdown", waittime=waittime)
                 elif action == "safe-stop":
                     if self.shutdown_server(
                         "manual safe stop requested",
@@ -2392,9 +2723,7 @@ class Supervisor:
                     if self.set_policy("stopped"):
                         self.stop_server("manual force-stop requested", waittime=0, force=True)
                 elif action == "restart":
-                    if not self.disruptive_action_blocked_by_policy("game restart"):
-                        if self.apply_start_request_policy(datetime.now().astimezone()):
-                            self.restart_server("manual restart requested", waittime=waittime)
+                    self.execute_advanced_action("restart", waittime=waittime)
                 elif action == "update":
                     update_wait = int(command.get("waittime", self.update_warning_seconds))
                     self.perform_update("manual update requested", waittime=update_wait)
@@ -2455,6 +2784,8 @@ class Supervisor:
             desired
             and self.proc is None
             and not self.update_blocked
+            and self.update_waiting_for_lock is None
+            and not self.update_in_progress
             and time.monotonic() >= self.next_start_monotonic
         ):
             self.start_server(desired_reason)
@@ -2569,7 +2900,28 @@ def main() -> int:
                     timespec="seconds"
                 ),
             })
-            install_or_update()
+            try:
+                install_or_update()
+            except SteamUpdateDeferredError as error:
+                if missing_required_game_files():
+                    # A first installation has no safe build to fall back to.
+                    raise
+                supervisor.last_update_error = str(error)
+                deferred_retry = max(
+                    supervisor.update_retry_interval,
+                    STEAM_DISTRIBUTION_RETRY_SECONDS,
+                )
+                supervisor.next_update_check_monotonic = time.monotonic() + deferred_retry
+                try:
+                    branch = os.getenv("STEAM_BETA", "").strip() or "public"
+                    supervisor.available_build = available_build_id(branch)
+                except (RuntimeError, ValueError):
+                    supervisor.available_build = None
+                log(
+                    "Steam startup update deferred because the anonymous download is "
+                    "unavailable; the intact installed build will start and automatic "
+                    f"retry is scheduled in {deferred_retry:g}s: {error}"
+                )
             prepare_game_files()
             supervisor.installed_build = installed_build_id()
             supervisor.last_prestart_update_check_monotonic = time.monotonic()

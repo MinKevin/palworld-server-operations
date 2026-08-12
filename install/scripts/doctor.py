@@ -161,6 +161,21 @@ def validate_server_args(value: str, name: str) -> None:
             )
 
 
+def check_admin_password(report: "Report", server: str, password: str) -> None:
+    """Require only the non-empty value needed by Basic Auth.
+
+    Password strength and length are operator policy. Do not reject a value
+    merely because it is short; apply any non-empty password selected by the
+    operator without a project-level length restriction.
+    """
+    if not password:
+        report.fail(f"{server}: REST API 인증을 위해 AdminPassword를 입력하세요.")
+    elif "CHANGE_ME" in password.upper():
+        report.warn(f"{server}: AdminPassword가 예시 값처럼 보입니다. 고유한 값 사용을 권장합니다.")
+    else:
+        report.pass_(f"{server} 관리자 비밀번호 설정됨(프로젝트 길이 제한 없음)")
+
+
 def run(command: Sequence[str], timeout: float = 20) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(command),
@@ -480,11 +495,9 @@ def validate_configs(
         else:
             report.pass_(f"{spec.name} 통합 API 외부 비공개(127.0.0.1 전용)")
 
-        password = env.get("PAL_SETTING_AdminPassword", "")
-        if len(password) < 12 or "CHANGE_ME" in password.upper():
-            report.fail(f"{spec.name}: AdminPassword를 12자 이상의 고유한 값으로 변경하세요.")
-        else:
-            report.pass_(f"{spec.name} 관리자 비밀번호 기본 검사")
+        check_admin_password(
+            report, spec.name, env.get("PAL_SETTING_AdminPassword", "")
+        )
 
         try:
             instances.validate_access_token(
@@ -1239,6 +1252,21 @@ def check_ready_server(
                     report.pass_(f"{spec.name} 운영 중 자동 업데이트 비활성")
             else:
                 report.fail(f"{spec.name} 자동 업데이트 설정과 감독기 상태가 다릅니다.")
+
+            update_error = str(status.get("last_update_error") or "").strip()
+            if update_error:
+                installed_build = status.get("installed_build_id")
+                available_build = status.get("available_build_id")
+                build_detail = (
+                    f"installed {installed_build}, available {available_build}"
+                    if isinstance(installed_build, int) and isinstance(available_build, int)
+                    else "the installed build is being preserved"
+                )
+                report.warn(
+                    f"{spec.name} Steam update is deferred ({build_detail}). "
+                    f"The game can continue on the installed build and automatic retry remains active: "
+                    f"{update_error}"
+                )
         except (json.JSONDecodeError, ValueError) as error:
             report.fail(f"{spec.name} palctl status 해석 실패: {error}")
     else:

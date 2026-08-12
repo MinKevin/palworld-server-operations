@@ -3,8 +3,8 @@
   "payloads": {
     "setup": {
       "file": "setup.tar.gz",
-      "size": 146177,
-      "sha256": "ae8669aac157554e1e03bc6164151da894ab576a08cd19953dcab4d2fdfc41ba",
+      "size": 152001,
+      "sha256": "467f74b76c3baf7d98a29c9715598847cda5793c86084e2739349a9bcb510ef8",
       "entries": [
         "install/Dockerfile",
         "install/lib.sh",
@@ -45,12 +45,12 @@
         {
           "entry": "install/manager",
           "path": "install/manager",
-          "sha256": "62327ef891aedbd482655c19335a2dd742e42c43aac4e629325bec46ee1ee8c7"
+          "sha256": "03411ae404d51fc552ddcfafc60fb1307057a7877c1ce9e43c632a1ec14b6c91"
         },
         {
           "entry": "install/scaffold.sh",
           "path": "install/scaffold.sh",
-          "sha256": "e9cd68c59764f0b923eb4f6fa372e8f2e574f38ea5c1b9098504474e0ec149e9"
+          "sha256": "1e71e77b9a3540a7421b6ccc72b576949bae851a9429e32221e087063d3608e7"
         },
         {
           "entry": "install/scripts/common.py",
@@ -60,7 +60,7 @@
         {
           "entry": "install/scripts/doctor.py",
           "path": "install/scripts/doctor.py",
-          "sha256": "72144d03b5963b4e58d872aa19cc0a0388090d1015517b9e3755273e5a90cd1d"
+          "sha256": "0654f7dae5f014be21e4318a1572e0216ab2b1f1b69635300053f25f95142ea8"
         },
         {
           "entry": "install/scripts/import_existing.py",
@@ -80,7 +80,7 @@
         {
           "entry": "install/scripts/manager.py",
           "path": "install/scripts/manager.py",
-          "sha256": "45b5eddd58c8de42c6a9ab39c4a56df665cd5bdf067aa30e1e7fded32247ecf9"
+          "sha256": "f6d07d5d84bcb9093ddafe4b2f4fd0fc948f684c6e91c1c39c2bb19728e9c95e"
         },
         {
           "entry": "install/scripts/palctl.py",
@@ -115,7 +115,7 @@
         {
           "entry": "install/setup.sh",
           "path": "install/setup.sh",
-          "sha256": "01d6169edb34cef959a107dd8754b79960baec2a30c340a589eef3eb6e5cdeee"
+          "sha256": "35b16c6a2a814856d73aac1338fb32bf024124b4a286316fc7970d6f48b28896"
         },
         {
           "entry": "install/test",
@@ -135,29 +135,29 @@
         {
           "entry": "scaffold/config/kr/common.env",
           "path": "config/kr/common.env",
-          "sha256": "0fbf2880f40c90353a22759927d4f1b51d65ef271fe513e45d659a4127412db1"
+          "sha256": "6d65bdfe7dc42e47cd9536ac402b382837683cbaf9c19f891ebb69179264ec2b"
         },
         {
           "entry": "scaffold/config/kr/server.template.env",
           "path": "config/kr/server.template.env",
-          "sha256": "3f8d83d9bd5deda486475b7f843ee420857f6e2f76721ca23e1d7f3872076734"
+          "sha256": "1029e3df62ee9496d5e42164a087c988fb094f844dbadf33142d8e60af8c6f23"
         },
         {
           "entry": "scaffold/config/en/common.env",
           "path": "config/en/common.env",
-          "sha256": "c6184be58ca66b388bc7a8cea66205f7f78de181e54b9bba12b5071b263e570f"
+          "sha256": "f99a8340586cab7d22c9782c575864c5009d68863c909435b58019e5b77fa7a6"
         },
         {
           "entry": "scaffold/config/en/server.template.env",
           "path": "config/en/server.template.env",
-          "sha256": "cb6eb0970d37ca422e5a1561a56113c0d59d825d5483f7bb4d5a580e94cd5ab6"
+          "sha256": "d01a69758281147f4f2a5e6e5d46b755633eac2519977b7742298ca9f41e3779"
         }
       ]
     },
     "test": {
       "file": "test.tar.gz",
-      "size": 30986,
-      "sha256": "526921fb8f5ef83e215506611984d63c4f4ed81a7e070e454d037285aec93d9f",
+      "size": 31377,
+      "sha256": "fc2278d615415697160246eb1389399a733039d0872d08570ba2a8d353781720",
       "entries": [
         "install/lib.sh",
         "install/test",
@@ -179,7 +179,7 @@
         {
           "entry": "install/scripts/doctor.py",
           "path": "install/scripts/doctor.py",
-          "sha256": "72144d03b5963b4e58d872aa19cc0a0388090d1015517b9e3755273e5a90cd1d"
+          "sha256": "0654f7dae5f014be21e4318a1572e0216ab2b1f1b69635300053f25f95142ea8"
         },
         {
           "entry": "install/scripts/instances.py",
@@ -195,8 +195,8 @@
     },
     "manage": {
       "file": "manage.tar.gz",
-      "size": 112151,
-      "sha256": "b93850a2efe0942741f889bf6593c16ad011b4b653038106b54ddbe704b9b48e",
+      "size": 116924,
+      "sha256": "ae91fff52cf045c5f84f21f9a71f05dc1513b6a526c7f09854ece25573ff8656",
       "entries": [
         "install/Dockerfile",
         "install/lib.sh",
@@ -228,7 +228,7 @@
         {
           "entry": "install/manager",
           "path": "install/manager",
-          "sha256": "62327ef891aedbd482655c19335a2dd742e42c43aac4e629325bec46ee1ee8c7"
+          "sha256": "03411ae404d51fc552ddcfafc60fb1307057a7877c1ce9e43c632a1ec14b6c91"
         },
         {
           "entry": "install/scripts/common.py",
@@ -238,7 +238,7 @@
         {
           "entry": "install/scripts/doctor.py",
           "path": "install/scripts/doctor.py",
-          "sha256": "72144d03b5963b4e58d872aa19cc0a0388090d1015517b9e3755273e5a90cd1d"
+          "sha256": "0654f7dae5f014be21e4318a1572e0216ab2b1f1b69635300053f25f95142ea8"
         },
         {
           "entry": "install/scripts/import_existing.py",
@@ -258,7 +258,7 @@
         {
           "entry": "install/scripts/manager.py",
           "path": "install/scripts/manager.py",
-          "sha256": "45b5eddd58c8de42c6a9ab39c4a56df665cd5bdf067aa30e1e7fded32247ecf9"
+          "sha256": "f6d07d5d84bcb9093ddafe4b2f4fd0fc948f684c6e91c1c39c2bb19728e9c95e"
         },
         {
           "entry": "install/scripts/palctl.py",

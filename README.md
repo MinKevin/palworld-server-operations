@@ -204,7 +204,7 @@ matching Server API connection.
 
 | Action | How to use it |
 |---|---|
-| **Update image and reapply settings** | Update the selected image and safely recreate the container from its saved configuration. |
+| **Update Docker image and reapply settings** | Update the selected Docker image and safely recreate the container from its saved configuration. It also backs up and refreshes `server.template.env` in the current UI language. The new layout applies to servers created afterward; existing `serverN.env` files are unchanged. |
 | **Reset server world** | Create a recovery archive, then initialize a new world. Enter the displayed `RESET serverN` confirmation. |
 | **Restore server world** | Choose a backup to restore. The container and its management API must be running; the game process may already be stopped. The pre-restore world is preserved as well. Enter `RESTORE serverN`. |
 | **Show API token** | Display the current token and synchronize the mapped Server API connection. |
@@ -240,8 +240,9 @@ Removal requires the exact `DELETE ...` confirmation shown by Admin.
 ### Routine operation
 
 - Prefer **Advanced Start**, **Advanced Restart**, and **Advanced Shutdown** to
-  the direct Shutdown/Stop calls. They handle the required player warning and
-  world save, then keep the supervisor's operating policy in sync.
+  the direct Shutdown/Stop calls. Advanced Start and Restart run SteamCMD update
+  and validation before launch; Restart and Shutdown also handle player warning
+  and world save. All three keep the supervisor's operating policy in sync.
 - Run only one state-changing Setup, Manage, Test, Remove, or restore operation
   at a time.
 - Review `[WARN]` and `[FAIL]` entries in Status History. Remove passwords,
@@ -291,7 +292,9 @@ Windows operator PC:
 Each Windows application is distributed as a single EXE. You do not need to
 install Python, a separate PowerShell module, or SSH.NET on the operator PC.
 
-A new game-file volume needs at least 12 GiB of free space before Setup. Keep
+A new game-file volume should have at least 12 GiB of free space before Setup. A
+low-space warning no longer blocks the operation, but SteamCMD installation or
+updates can still fail if the volume runs out of space. Keep
 additional space available for worlds, backups, logs, and future updates.
 
 ## Configuration and data
@@ -346,9 +349,14 @@ than only the user workflow.
 - Host-wide and project-wide management locks serialize Setup, Manage, Test,
   and Remove.
 - Multiple `serverN` instances briefly share the authoritative Steam BuildID
-  result, while a host-wide lock allows only one SteamCMD update at a time.
+  result from SteamCMD `app_info_print`—not GitHub—while a host-wide lock allows
+  only one SteamCMD update at a time.
   Per-server SteamCMD state volumes preserve update metadata across container
   recreation.
+- If Steam rejects an old depot referenced by the installed app manifest, the
+  supervisor backs up only that manifest and retries against current depot
+  metadata. If recovery also fails, it restarts the intact installed build,
+  exposes the reason in status, and waits at least 30 minutes before retrying.
 - Removal deletes only paths and resources that can be verified as
   project-owned. Unrelated top-level files are preserved.
 

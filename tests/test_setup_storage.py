@@ -86,18 +86,18 @@ preflight_server_volume_space server1
             check=False,
         )
 
-    def test_fresh_install_requires_twelve_gib_before_container_stop(self) -> None:
+    def test_fresh_install_warns_below_twelve_gib_and_continues(self) -> None:
         just_under_twelve_gib = 12 * 1024**3 - 1
         result = self.run_preflight(
             f"missing {just_under_twelve_gib} {20 * 1024**3} 12.00 20.00"
         )
 
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("12 GiB", result.stderr)
-        self.assertIn("기존 컨테이너는 변경하지 않았습니다", result.stderr)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("[WARN]", result.stdout)
+        self.assertIn("12 GiB", result.stdout)
         self.assertNotIn("docker stop", PREFLIGHT_SOURCE)
 
-    def test_existing_install_has_four_gib_hard_floor_and_twelve_gib_warning(self) -> None:
+    def test_existing_install_warns_below_four_or_twelve_gib_and_continues(self) -> None:
         below_floor = self.run_preflight(
             f"ready {4 * 1024**3 - 1} {20 * 1024**3} 4.00 20.00"
         )
@@ -105,8 +105,9 @@ preflight_server_volume_space server1
             f"ready {6 * 1024**3} {20 * 1024**3} 6.00 20.00"
         )
 
-        self.assertEqual(below_floor.returncode, 1)
-        self.assertIn("최소 4 GiB", below_floor.stderr)
+        self.assertEqual(below_floor.returncode, 0)
+        self.assertIn("[WARN]", below_floor.stdout)
+        self.assertIn("4 GiB", below_floor.stdout)
         self.assertEqual(warned.returncode, 0)
         self.assertIn("[WARN]", warned.stdout)
         self.assertIn("12 GiB 이상 확보", warned.stdout)

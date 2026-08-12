@@ -261,8 +261,17 @@ class WindowsSshManagerTests(unittest.TestCase):
         self.assertIn("function Save-PalworldRemoteServerEnv", source)
         self.assertIn('"SERVER_PORT"', source)
         self.assertIn('"PAL_SETTING_RESTAPIPort"', source)
-        self.assertIn("backups/$Server/env", source)
+        self.assertIn("PAL_ENV_BACKUP=", source)
         self.assertIn('$edited.Action -eq "Apply"', source)
+        env_apply = source[
+            source.index('        "EnvEdit" {') : source.index('        "Test" {')
+        ]
+        self.assertIn("-Action EnvApply", env_apply)
+        self.assertIn("-EnvBackup ([string]$envBackup)", env_apply)
+        self.assertIn("-Payload manage", env_apply)
+        self.assertIn("New-PalworldManagerCommand", env_apply)
+        self.assertNotIn("New-PalworldSetupCommand", env_apply)
+        self.assertNotIn("-Mode update", env_apply)
 
     def test_ssh_connections_store_all_required_encrypted_fields(self) -> None:
         source = SSH_SOURCE.read_text("utf-8")
@@ -594,6 +603,9 @@ class WindowsSshManagerTests(unittest.TestCase):
         self.assertIn("Remove-PalworldSshTemporaryDirectory", source)
         self.assertNotIn("function New-PalworldRemoteArtifactCleanupCommand", source)
         self.assertIn("prepare-scaffold --scaffold", source)
+        self.assertIn('$Mode -eq "update"', source)
+        self.assertIn('" --refresh-server-template"', source)
+        self.assertIn('Replace("__TEMPLATE_REFRESH__", $templateRefreshArgument)', source)
         self.assertIn("acquire_palworld_project_operation_lock", (ROOT / "install/lib.sh").read_text("utf-8"))
         self.assertIn("-mmin +60", source)
         self.assertIn("[a-f0-9]{32}-(setup|test|manage)", source)

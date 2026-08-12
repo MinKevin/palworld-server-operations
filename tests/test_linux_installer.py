@@ -63,6 +63,10 @@ class LinuxInstallerTests(unittest.TestCase):
         self.assertIn('"$project_dir/PalworldServerInstaller.run"', scaffold)
         self.assertNotIn('install -m 0644 "$scaffold_dir/$document"', scaffold)
         self.assertIn("ensure_common_default", scaffold)
+        self.assertIn("PALWORLD_REFRESH_SERVER_TEMPLATE", scaffold)
+        self.assertIn('backups/template', scaffold)
+        self.assertIn('cmp -s -- "$server_template_source"', scaffold)
+        self.assertIn("--refresh-server-template", (ROOT / "install/manager").read_text("utf-8"))
         self.assertIn("palworld-server-operations-project-v1", scaffold)
         self.assertIn("detect_host_timezone", scaffold)
         self.assertIn('install -m 0644 "$scaffold_dir/LICENSE"', scaffold)
@@ -107,7 +111,7 @@ class LinuxInstallerTests(unittest.TestCase):
         for action in (
             "Install and start a new server",
             "Import an existing server",
-            "Update image and reapply settings",
+            "Update Docker image and reapply settings",
             "Reset server world",
             "Restore server world",
             "Show API token",
@@ -210,7 +214,9 @@ class LinuxInstallerTests(unittest.TestCase):
             manager.index("manage_server_token()") : manager.index("assert_root()")
         ]
         recovery_section = manager[
-            manager.index("wait_for_token_rotation_recovery()") : manager.index("recover_token_rotation_state()")
+            manager.index("wait_for_managed_container_recovery()") : manager.index(
+                "recover_token_rotation_state()"
+            )
         ]
         self.assertIn("docker exec -i", recovery_section)
         self.assertIn("expected_token = sys.stdin.read()", recovery_section)
@@ -249,6 +255,37 @@ class LinuxInstallerTests(unittest.TestCase):
         self.assertIn("/var/lib/palworld-server-operations", library)
         self.assertIn("register_palworld_host_project", setup)
         self.assertIn("release_palworld_host_project_registration", manager)
+
+    def test_server_env_apply_uses_a_lightweight_transactional_recreate(self) -> None:
+        manager = (ROOT / "install/manager").read_text(encoding="utf-8")
+        section = manager[
+            manager.index("apply_server_env()") : manager.index(
+                "acquire_common_or_registered_project_guard()"
+            )
+        ]
+
+        lock = section.index("acquire_palworld_project_operation_lock")
+        validation = section.index('--config-only --server "$server"')
+        compose_validation = section.index("palworld_compose config --quiet")
+        port_preflight = section.index('preflight-host-ports "$server"')
+        world_save = section.index('docker exec "$container_id" palctl save')
+        container_stop = section.index('docker stop --time 120 "$container_id"')
+        recreate = section.index(
+            'palworld_compose up -d --no-build --force-recreate "$server"'
+        )
+
+        self.assertLess(lock, validation)
+        self.assertLess(validation, compose_validation)
+        self.assertLess(compose_validation, port_preflight)
+        self.assertLess(port_preflight, world_save)
+        self.assertLess(world_save, container_stop)
+        self.assertLess(container_stop, recreate)
+        self.assertIn("validate_server_env_backup_path", section)
+        self.assertIn("wait_for_managed_container_recovery", section)
+        self.assertGreaterEqual(section.count("recover_server_env_apply"), 3)
+        self.assertIn("--no-start --no-build --force-recreate", section)
+        self.assertNotIn("docker build", section)
+        self.assertNotIn("prepare_host", section)
 
     def test_runtime_compose_does_not_depend_on_temporary_build_context(self) -> None:
         source = (ROOT / "install/scripts/instances.py").read_text(encoding="utf-8")

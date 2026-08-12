@@ -308,17 +308,17 @@ print(
         return 1
     fi
 
-    if [[ "$files_state" == missing ]] && (( free_bytes < fresh_install_min_bytes )); then
-        echo "오류: $server SteamCMD 최초 설치 전에 Docker 게임 파일 볼륨에 12 GiB 이상의 여유 공간이 필요합니다." >&2
-        echo "현재 사용 가능 ${free_gib} GiB / 전체 ${total_gib} GiB. 기존 컨테이너는 변경하지 않았습니다." >&2
-        return 1
-    fi
-    if [[ "$files_state" == ready ]] && (( free_bytes < existing_update_min_bytes )); then
-        echo "오류: $server 갱신 전에 Docker 게임 파일 볼륨에 최소 4 GiB의 여유 공간이 필요합니다." >&2
-        echo "현재 사용 가능 ${free_gib} GiB / 전체 ${total_gib} GiB. 기존 컨테이너는 변경하지 않았습니다." >&2
-        return 1
-    fi
-    if (( free_bytes < fresh_install_min_bytes )); then
+    if [[ "$files_state" == missing ]]; then
+        if (( free_bytes < fresh_install_min_bytes )); then
+            echo "[WARN] $server SteamCMD 최초 설치 권장 여유 공간 12 GiB 미만입니다: 사용 가능 ${free_gib} GiB / 전체 ${total_gib} GiB"
+            echo "[WARN] 저장공간 부족으로 설치가 실패할 수 있지만 작업을 계속합니다."
+        else
+            echo "[PASS] $server Docker 게임 파일 저장공간: 사용 가능 ${free_gib} GiB / 전체 ${total_gib} GiB"
+        fi
+    elif [[ "$files_state" == ready ]] && (( free_bytes < existing_update_min_bytes )); then
+        echo "[WARN] $server 갱신 권장 여유 공간 4 GiB 미만입니다: 사용 가능 ${free_gib} GiB / 전체 ${total_gib} GiB"
+        echo "[WARN] 저장공간 부족으로 SteamCMD 갱신이 실패할 수 있지만 작업을 계속합니다."
+    elif (( free_bytes < fresh_install_min_bytes )); then
         echo "[WARN] $server Docker 게임 파일 저장공간이 적습니다: 사용 가능 ${free_gib} GiB / 전체 ${total_gib} GiB"
         echo "[WARN] 기존 설치 갱신은 계속하지만 대규모 Steam 업데이트 전에 12 GiB 이상 확보하는 것을 권장합니다."
     else

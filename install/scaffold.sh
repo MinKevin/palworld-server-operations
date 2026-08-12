@@ -10,7 +10,7 @@ if (( $# != 2 )); then
     exit 2
 fi
 
-for command in awk install mktemp mv; do
+for command in awk cmp cp date install mktemp mv; do
     command -v "$command" >/dev/null 2>&1 || {
         echo "오류: project scaffold에 필요한 Linux 기본 명령 누락: $command" >&2
         exit 1
@@ -225,12 +225,43 @@ if [[ "$(read_common_value REST_API_PORT_BASE)" == auto ]]; then
     echo "공통 설정 auto 값 고정: REST_API_PORT_BASE=39472"
 fi
 
-if [[ ! -e "$project_dir/config/server.template.env" ]]; then
+server_template_target="$project_dir/config/server.template.env"
+refresh_server_template="${PALWORLD_REFRESH_SERVER_TEMPLATE:-false}"
+case "$refresh_server_template" in
+    true|false) ;;
+    *)
+        echo "오류: PALWORLD_REFRESH_SERVER_TEMPLATE은 true 또는 false여야 합니다." >&2
+        exit 2
+        ;;
+esac
+
+if [[ ! -e "$server_template_target" && ! -L "$server_template_target" ]]; then
     install -m 0644 \
         "$server_template_source" \
-        "$project_dir/config/server.template.env"
+        "$server_template_target"
+elif [[ -L "$server_template_target" || ! -f "$server_template_target" ]]; then
+    echo "오류: 기존 server.template.env가 안전한 일반 파일이 아닙니다: $server_template_target" >&2
+    exit 1
+elif [[ "$refresh_server_template" == true ]]; then
+    if cmp -s -- "$server_template_source" "$server_template_target"; then
+        echo "서버 설정 템플릿이 이미 최신 상태입니다: $server_template_target"
+    else
+        template_backup_dir="$project_dir/backups/template"
+        if [[ -L "$template_backup_dir" || ( -e "$template_backup_dir" && ! -d "$template_backup_dir" ) ]]; then
+            echo "오류: server.template.env 백업 경로가 안전한 일반 디렉터리가 아닙니다: $template_backup_dir" >&2
+            exit 1
+        fi
+        install -d -m 0700 -- "$template_backup_dir"
+        template_backup="$(mktemp "$template_backup_dir/server.template.$(date '+%Y.%m.%d-%H.%M.%S').XXXXXXXX.env")"
+        cp -p -- "$server_template_target" "$template_backup"
+        template_temporary="$(mktemp "$project_dir/config/.server.template.env.XXXXXXXX")"
+        install -m 0644 -- "$server_template_source" "$template_temporary"
+        mv -f -- "$template_temporary" "$server_template_target"
+        echo "[PASS] 신규 서버 설정 템플릿을 현재 프로그램 버전으로 갱신했습니다."
+        echo "[INFO] 이전 서버 설정 템플릿 백업: $template_backup"
+    fi
 else
-    echo "기존 설정 유지: $project_dir/config/server.template.env"
+    echo "기존 설정 유지: $server_template_target"
 fi
 
 echo "서버 관리 디렉터리 준비 완료: $project_dir"

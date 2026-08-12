@@ -361,7 +361,8 @@ class ExistingServerImportTests(unittest.TestCase):
             self.assertTrue(sync["updated"])
             self.assertTrue(Path(sync["backup"]).is_file())
             synced_template = template.read_text(encoding="utf-8")
-            self.assertIn("# PAL_SETTING_Difficulty=raw:None", synced_template)
+            self.assertIn("PAL_SETTING_Difficulty=raw:None", synced_template)
+            self.assertEqual(synced_template.count("ACTIVE_WINDOW=18:00-02:00"), 1)
             self.assertIn("ACTIVE_WINDOW=18:00-02:00", synced_template)
             self.assertIn(
                 "PAL_SETTING_LocalProjectExtension=raw:Enabled", synced_template

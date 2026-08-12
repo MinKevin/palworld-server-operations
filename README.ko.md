@@ -189,7 +189,7 @@ API 연결에는 HTTP Basic 사용자명·관리자 비밀번호와 서버별 AP
 
 | 작업 | 사용 방법 |
 |---|---|
-| **이미지 갱신 및 설정 재적용** | 선택한 서버 이미지를 갱신하고 저장된 설정으로 컨테이너를 다시 만듭니다. |
+| **Docker 이미지 갱신 및 설정 재적용** | 선택한 Docker 이미지를 갱신하고 저장된 설정으로 컨테이너를 다시 만듭니다. 현재 언어의 `server.template.env`도 백업 후 갱신하며, 새 양식은 이후 생성하는 서버부터 사용합니다. 기존 `serverN.env`는 변경하지 않습니다. |
 | **서버 월드 초기화** | 복구용 보관본을 만든 뒤 새 월드를 생성합니다. 화면에 표시된 `RESET serverN`을 입력합니다. |
 | **서버 월드 복원** | 백업을 선택해 복원합니다. 컨테이너와 관리 API는 실행 중이어야 하며 게임 프로세스는 이미 정지되어 있어도 됩니다. 복원 직전 월드도 별도 보존합니다. `RESTORE serverN`을 입력합니다. |
 | **API token 확인** | 현재 토큰을 표시하고 연결된 Server API 항목과 동기화합니다. |
@@ -225,8 +225,9 @@ REST·관리 API와 관리 명령을 종합적으로 점검합니다.
 ### 평소 운영
 
 - 일반 운영에는 직접 Shutdown/Stop보다 **Advanced Start**, **Advanced
-  Restart**, **Advanced Shutdown**을 권장합니다. 필요한 플레이어 안내와 월드
-  저장을 처리하고 감독기의 운영 정책까지 함께 반영합니다.
+  Restart**, **Advanced Shutdown**을 권장합니다. Advanced Start와 Restart는
+  시작 전에 SteamCMD 갱신·검증을 실행하며, Restart와 Shutdown은 플레이어 안내와
+  월드 저장도 처리합니다. 세 기능 모두 감독기의 운영 정책을 함께 반영합니다.
 - 상태를 바꾸는 Setup·Manage·Test·Remove 또는 복원 작업은 한 번에 하나만
   실행하세요.
 - Status History에서 `[WARN]`과 `[FAIL]`을 확인하세요. 로그를 공유할 때는
@@ -274,7 +275,8 @@ Windows 운영 PC:
 각 Windows 프로그램은 단일 EXE로 배포됩니다. Python, 별도 PowerShell 모듈,
 SSH.NET DLL을 따로 설치할 필요가 없습니다.
 
-새 게임 파일 volume은 Setup 전에 최소 12 GiB의 여유 공간이 필요합니다.
+새 게임 파일 volume은 Setup 전에 12 GiB 이상의 여유 공간을 권장합니다.
+여유 공간이 부족하면 경고 후 계속 진행하지만 SteamCMD 설치 또는 갱신은 실패할 수 있습니다.
 월드, 백업, 로그와 향후 업데이트를 위한 공간은 별도로 더 확보하세요.
 
 ## 설정과 데이터
@@ -325,8 +327,12 @@ volume과 월드·백업 데이터는 서로 다른 저장소이므로 디스크
 - 호스트 단위·프로젝트 단위 관리 잠금으로 Setup, Manage, Test, Remove를
   직렬화합니다.
 - 같은 호스트의 여러 `serverN`이 실제 Steam BuildID 조회 결과를 짧게 공유하고,
-  SteamCMD 업데이트는 공유 잠금으로 한 번에 하나만 실행합니다. 서버별 SteamCMD
+  이 값은 GitHub가 아닌 SteamCMD `app_info_print`에서 조회합니다. SteamCMD
+  업데이트는 공유 잠금으로 한 번에 하나만 실행합니다. 서버별 SteamCMD
   상태 볼륨은 컨테이너를 다시 만들어도 업데이트 메타데이터를 유지합니다.
+- Steam이 기존 설치 manifest가 참조하는 과거 depot를 거부하면 manifest만 백업해
+  현재 depot 기준으로 자동 복구합니다. 복구도 실패하면 온전한 기존 빌드를 다시
+  시작하고 원인을 상태에 남긴 뒤 최소 30분 후 재시도합니다.
 - 삭제 시에도 프로젝트가 소유한 것으로 확인된 경로와 자원만 제거하며,
   관계없는 최상위 파일은 보존합니다.
 

@@ -283,6 +283,26 @@ class EnvTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             doctor.validate_server_args('"unterminated', "SERVER_ARGS")
 
+    def test_admin_password_has_no_project_length_limit(self) -> None:
+        short_report = doctor.Report()
+        doctor.check_admin_password(short_report, "server1", "x")
+        self.assertEqual(short_report.failed, 0)
+        self.assertEqual(short_report.passed, 1)
+
+        long_report = doctor.Report()
+        doctor.check_admin_password(long_report, "server1", "x" * 4096)
+        self.assertEqual(long_report.failed, 0)
+        self.assertEqual(long_report.passed, 1)
+
+        placeholder_report = doctor.Report()
+        doctor.check_admin_password(placeholder_report, "server1", "CHANGE_ME")
+        self.assertEqual(placeholder_report.failed, 0)
+        self.assertEqual(placeholder_report.warnings, 1)
+
+        empty_report = doctor.Report()
+        doctor.check_admin_password(empty_report, "server1", "")
+        self.assertEqual(empty_report.failed, 1)
+
     def test_repeated_game_failure_is_detected(self) -> None:
         status = {
             "manager": "running",
@@ -704,8 +724,8 @@ class ContainerImageTests(unittest.TestCase):
         )
         self.assertLess(build_call, storage_preflight_call)
         self.assertLess(storage_preflight_call, prepare_data_call)
-        self.assertIn("SteamCMD 최초 설치 전에", content)
-        self.assertIn("기존 컨테이너는 변경하지 않았습니다", content)
+        self.assertIn("SteamCMD 최초 설치 권장 여유 공간", content)
+        self.assertIn("설치가 실패할 수 있지만 작업을 계속합니다", content)
         self.assertIn(
             'PALWORLD_PROJECT_UID="$(stat -c \'%u\' -- "$PALWORLD_PROJECT_DIR")"',
             helper,
