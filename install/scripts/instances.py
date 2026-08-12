@@ -35,7 +35,7 @@ PROJECT_LABEL = "io.palworld.project-dir"
 COMPOSE_WORKING_DIR_LABEL = "com.docker.compose.project.working_dir"
 SERVER_RE = re.compile(r"server([1-9][0-9]*)$")
 CONTAINER_RE = re.compile(r"palworld-server([1-9][0-9]*)$")
-VOLUME_RE = re.compile(r"palworld-(server[1-9][0-9]*)-(?:server|data)$")
+VOLUME_RE = re.compile(r"palworld-(server[1-9][0-9]*)-(?:server|steam|data)$")
 ACCESS_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,128}")
 DEFAULT_GAME_PORT_BASE = 39471
 DEFAULT_REST_API_PORT_BASE = DEFAULT_GAME_PORT_BASE + 1
@@ -91,6 +91,11 @@ def update_lock_dir() -> Path:
 def server_volume_name(name: str) -> str:
     server_number(name)
     return f"palworld-{name}-server"
+
+
+def steam_volume_name(name: str) -> str:
+    server_number(name)
+    return f"palworld-{name}-steam"
 
 
 def container_name(name: str) -> str:
@@ -768,7 +773,11 @@ def assert_server_ownership(name: str) -> None:
                 if isinstance(mount, dict) and str(mount.get("Type", "")) == "volume"
             }
 
-    for volume_name in (server_volume_name(name), f"palworld-{name}-data"):
+    for volume_name in (
+        server_volume_name(name),
+        steam_volume_name(name),
+        f"palworld-{name}-data",
+    ):
         volume = docker_inspect_payload(["volume", "inspect", volume_name], volume_name)
         if volume is None:
             continue
@@ -940,7 +949,7 @@ def reserved_server_names() -> list[str]:
         volumes = None
     if volumes is not None and volumes.returncode == 0:
         for volume in volumes.stdout.splitlines():
-            match = re.fullmatch(r"palworld-(server[1-9][0-9]*)-(?:server|data)", volume.strip())
+            match = VOLUME_RE.fullmatch(volume.strip())
             if match:
                 names.add(match.group(1))
     return sorted(names, key=server_sort_key)
@@ -1048,6 +1057,9 @@ def generate_compose() -> Path:
                 "      - type: volume",
                 f"        source: {name}-server",
                 "        target: /palworld/server",
+                "      - type: volume",
+                f"        source: {name}-steam",
+                "        target: /home/palworld/.local/share/Steam",
                 "      - type: bind",
                 f"        source: {yaml_string(str(saved_path(name)))}",
                 "        target: /palworld/server/Pal/Saved",
@@ -1102,6 +1114,9 @@ def generate_compose() -> Path:
                 [
                     f"  {name}-server:",
                     f"    name: {yaml_string(server_volume_name(name))}",
+                    "    external: true",
+                    f"  {name}-steam:",
+                    f"    name: {yaml_string(steam_volume_name(name))}",
                     "    external: true",
                 ]
             )

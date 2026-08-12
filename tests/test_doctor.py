@@ -283,6 +283,26 @@ class EnvTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             doctor.validate_server_args('"unterminated', "SERVER_ARGS")
 
+    def test_admin_password_has_no_project_length_limit(self) -> None:
+        short_report = doctor.Report()
+        doctor.check_admin_password(short_report, "server1", "x")
+        self.assertEqual(short_report.failed, 0)
+        self.assertEqual(short_report.passed, 1)
+
+        long_report = doctor.Report()
+        doctor.check_admin_password(long_report, "server1", "x" * 4096)
+        self.assertEqual(long_report.failed, 0)
+        self.assertEqual(long_report.passed, 1)
+
+        placeholder_report = doctor.Report()
+        doctor.check_admin_password(placeholder_report, "server1", "CHANGE_ME")
+        self.assertEqual(placeholder_report.failed, 0)
+        self.assertEqual(placeholder_report.warnings, 1)
+
+        empty_report = doctor.Report()
+        doctor.check_admin_password(empty_report, "server1", "")
+        self.assertEqual(empty_report.failed, 1)
+
     def test_repeated_game_failure_is_detected(self) -> None:
         status = {
             "manager": "running",
@@ -459,6 +479,13 @@ class EnvTests(unittest.TestCase):
                     "RW": True,
                 },
                 {
+                    "Type": "volume",
+                    "Name": "palworld-server1-steam",
+                    "Source": "/var/lib/docker/volumes/palworld-server1-steam/_data",
+                    "Destination": "/home/palworld/.local/share/Steam",
+                    "RW": True,
+                },
+                {
                     "Type": "bind",
                     "Source": str(doctor.instances.saved_path("server1").resolve()),
                     "Destination": "/palworld/server/Pal/Saved",
@@ -515,6 +542,7 @@ class EnvTests(unittest.TestCase):
         errors = doctor.storage_mount_errors(inspected, spec)
         self.assertTrue(any("shared update lock bind mount missing" in error for error in errors))
         self.assertTrue(any("named volume 누락" in error for error in errors))
+        self.assertTrue(any("SteamCMD 상태 named volume 누락" in error for error in errors))
         self.assertTrue(any("Saved bind mount 누락" in error for error in errors))
         self.assertTrue(any("runtime logs bind mount 누락" in error for error in errors))
         self.assertTrue(any("운영 정책 bind mount 누락" in error for error in errors))
@@ -654,12 +682,18 @@ class ContainerImageTests(unittest.TestCase):
         self.assertIn('prepare_server_data "$server"', content)
         self.assertIn('data/$server/saved', content)
         self.assertIn('server_volume="palworld-$server-server"', content)
+        self.assertIn('steam_volume="palworld-$server-steam"', content)
         self.assertIn('.manager-bind-test', content)
         self.assertIn('.manager-volume-test', content)
         self.assertIn('.manager-log-test', content)
         self.assertIn('--volume "$logs_dir:/palworld/logs"', content)
         self.assertIn('.manager-policy-test', content)
         self.assertIn('--volume "$policy_dir:/palworld/policy"', content)
+        self.assertIn(
+            '--volume "$steam_volume:/home/palworld/.local/share/Steam"',
+            content,
+        )
+        self.assertIn('.manager-steam-test', content)
         self.assertIn(
             'prepare_shared_update_storage "$PALWORLD_UID" "$PALWORLD_GID"', content
         )
@@ -684,14 +718,14 @@ class ContainerImageTests(unittest.TestCase):
         prepare_data_call = content.rindex('prepare_server_data "$server"')
         self.assertLess(
             content.rindex(
-                'ensure_server_volume "$server"\necho "팰월드 서버 이미지를 빌드합니다."'
+                'ensure_server_volume "$server"\nensure_steam_volume "$server"\necho "팰월드 서버 이미지를 빌드합니다."'
             ),
             build_call,
         )
         self.assertLess(build_call, storage_preflight_call)
         self.assertLess(storage_preflight_call, prepare_data_call)
-        self.assertIn("SteamCMD 최초 설치 전에", content)
-        self.assertIn("기존 컨테이너는 변경하지 않았습니다", content)
+        self.assertIn("SteamCMD 최초 설치 권장 여유 공간", content)
+        self.assertIn("설치가 실패할 수 있지만 작업을 계속합니다", content)
         self.assertIn(
             'PALWORLD_PROJECT_UID="$(stat -c \'%u\' -- "$PALWORLD_PROJECT_DIR")"',
             helper,
@@ -743,8 +777,10 @@ class ContainerImageTests(unittest.TestCase):
     def test_remove_deletes_current_and_legacy_server_volumes(self) -> None:
         content = (ROOT / "install" / "manager").read_text(encoding="utf-8")
         self.assertIn('server_volume="palworld-$server-server"', content)
+        self.assertIn('steam_volume="palworld-$server-steam"', content)
         self.assertIn('legacy_volume="palworld-$server-data"', content)
         self.assertIn('remove_docker_volume "$server_volume"', content)
+        self.assertIn('remove_docker_volume "$steam_volume"', content)
         self.assertIn('remove_docker_volume "$legacy_volume"', content)
         self.assertIn('docker volume rm "$volume"', content)
         self.assertIn('rm -rf -- "$backup_target"', content)
@@ -795,7 +831,7 @@ class ContainerImageTests(unittest.TestCase):
         helper = (ROOT / "install" / "lib.sh").read_text(encoding="utf-8")
         manager_source = (ROOT / "install" / "manager").read_text(encoding="utf-8")
 
-        expected_layout = "policy-bind-v1+update-lock-v1"
+        expected_layout = "policy-bind-v1+update-lock-v1+steam-state-v1"
         self.assertIn(f'io.palworld.runtime-layout="{expected_layout}"', dockerfile)
         self.assertIn(f'PALWORLD_RUNTIME_LAYOUT="{expected_layout}"', helper)
         self.assertIn('index .Config.Labels "io.palworld.runtime-layout"', helper)

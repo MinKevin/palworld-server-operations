@@ -3,7 +3,7 @@ FROM steamcmd/steamcmd:ubuntu-22
 ARG PALWORLD_PROJECT_DIR=/opt/palworld-project
 
 LABEL io.palworld.image="palworld-dedicated-server" \
-    io.palworld.runtime-layout="policy-bind-v1+update-lock-v1" \
+    io.palworld.runtime-layout="policy-bind-v1+update-lock-v1+steam-state-v1" \
     io.palworld.project-dir="${PALWORLD_PROJECT_DIR}"
 
 USER root

@@ -529,6 +529,12 @@ class ConfigurationGenerationTests(unittest.TestCase):
                 self.assertGreaterEqual(compose.count("read_only: true"), 4)
                 self.assertIn('name: "palworld-server3-server"', compose)
                 self.assertIn("target: /palworld/server", compose)
+                self.assertEqual(
+                    instances.steam_volume_name("server3"),
+                    "palworld-server3-steam",
+                )
+                self.assertIn('name: "palworld-server3-steam"', compose)
+                self.assertIn("target: /home/palworld/.local/share/Steam", compose)
                 self.assertIn('"127.0.0.1:9042:8213/tcp"', compose)
                 self.assertNotIn('"127.0.0.1:9042:9042/tcp"', compose)
 

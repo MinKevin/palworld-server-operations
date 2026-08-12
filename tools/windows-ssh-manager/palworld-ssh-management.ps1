@@ -3166,7 +3166,6 @@ function Save-PalworldRemoteServerEnv {
     $remoteUpload = Send-PalworldRemoteTemporaryText `
         -Connection $Connection -Owner $Owner -Content $normalized -Prefix "palworld-env"
     $uploadLiteral = ConvertTo-PosixLiteral $remoteUpload
-    $backupDirectory = "$project/backups/$Server/env"
     $serverLiteral = ConvertTo-PosixLiteral $Server
     $arguments = "write-env --kind server --server $serverLiteral --source $uploadLiteral --expected-sha256 $ExpectedHash"
     try {
@@ -3179,8 +3178,11 @@ function Save-PalworldRemoteServerEnv {
             }.GetNewClosure()
         if ($result.ExitCode -ne 0) { throw "Remote env save failed with exit code $($result.ExitCode)." }
         $backupMatch = [Text.RegularExpressions.Regex]::Match($result.Output, 'PAL_ENV_BACKUP=([^\r\n]+)')
-        $backup = if ($backupMatch.Success) { $backupMatch.Groups[1].Value.Trim() } else { $backupDirectory }
-        Add-PalworldSshOutput "`r`n[PASS] $Server.env saved. Previous file: $backup`r`n"
+        if (-not $backupMatch.Success) {
+            throw "The remote server.env save did not return its recovery backup path."
+        }
+        $backup = $backupMatch.Groups[1].Value.Trim()
+        [void](Add-PalworldSshOutput "`r`n[PASS] $Server.env saved. Previous file: $backup`r`n")
         return $backup
     }
     finally {
@@ -4488,13 +4490,15 @@ function New-PalworldSetupCommand {
     $toolsLiteral = ConvertTo-PosixLiteral $Tools
     if ($Mode -eq "update" -and -not $Server) { throw "Update requires a server name." }
     $serverArguments = if ($Server) { " --server " + (ConvertTo-PosixLiteral $Server) } else { "" }
+    $templateRefreshArgument = if ($Mode -eq "update") { " --refresh-server-template" } else { "" }
     $envLanguage = if ($script:ApplicationLanguage -eq "en") { "en" } else { "ko" }
     $template = @'
-project=__PROJECT__; tools=__TOOLS__; test -d "$project" && __PALWORLD_SUDO__ env PALWORLD_PROJECT_DIR="$project" PALWORLD_INSTALL_DIR="$tools/install" PALWORLD_ENV_LANGUAGE=__ENV_LANGUAGE__ PYTHONDONTWRITEBYTECODE=1 bash "$tools/install/manager" prepare-scaffold --scaffold "$tools/scaffold" --language __ENV_LANGUAGE__ && __PALWORLD_SUDO__ env PALWORLD_PROJECT_DIR="$project" PALWORLD_INSTALL_DIR="$tools/install" PALWORLD_ENV_LANGUAGE=__ENV_LANGUAGE__ PYTHONDONTWRITEBYTECODE=1 bash "$tools/install/manager" __MODE____SERVER_ARGS__
+project=__PROJECT__; tools=__TOOLS__; test -d "$project" && __PALWORLD_SUDO__ env PALWORLD_PROJECT_DIR="$project" PALWORLD_INSTALL_DIR="$tools/install" PALWORLD_ENV_LANGUAGE=__ENV_LANGUAGE__ PYTHONDONTWRITEBYTECODE=1 bash "$tools/install/manager" prepare-scaffold --scaffold "$tools/scaffold" --language __ENV_LANGUAGE____TEMPLATE_REFRESH__ && __PALWORLD_SUDO__ env PALWORLD_PROJECT_DIR="$project" PALWORLD_INSTALL_DIR="$tools/install" PALWORLD_ENV_LANGUAGE=__ENV_LANGUAGE__ PYTHONDONTWRITEBYTECODE=1 bash "$tools/install/manager" __MODE____SERVER_ARGS__
 '@
     return $template.Replace("__PROJECT__", $projectLiteral).
         Replace("__TOOLS__", $toolsLiteral).
         Replace("__ENV_LANGUAGE__", $envLanguage).
+        Replace("__TEMPLATE_REFRESH__", $templateRefreshArgument).
         Replace("__MODE__", $Mode).
         Replace("__SERVER_ARGS__", $serverArguments).Trim()
 }
@@ -5554,19 +5558,27 @@ function Assert-PalworldSshManagementActionTarget {
 function New-PalworldManagerActionArguments {
     param(
         [ValidateSet(
-            "Reset", "RestoreList", "Restore", "TokenShow", "TokenRotate",
+            "EnvApply", "Reset", "RestoreList", "Restore", "TokenShow", "TokenRotate",
             "RemoveServer", "RemoveAll", "RemoveProject"
         )][string]$Action,
         [AllowEmptyString()][string]$Server = "",
-        [AllowEmptyString()][string]$Backup = ""
+        [AllowEmptyString()][string]$Backup = "",
+        [AllowEmptyString()][string]$EnvBackup = ""
     )
     if ($Action -in @(
-        "Reset", "RestoreList", "Restore", "TokenShow", "TokenRotate", "RemoveServer"
+        "EnvApply", "Reset", "RestoreList", "Restore", "TokenShow", "TokenRotate", "RemoveServer"
     )) {
         Assert-PalworldServerName $Server
     }
     $serverLiteral = if ($Server) { ConvertTo-PosixLiteral $Server } else { "" }
     switch ($Action) {
+        "EnvApply" {
+            if (-not $EnvBackup.StartsWith("/")) {
+                throw "Remote server.env backup path is invalid."
+            }
+            return "apply-env --server $serverLiteral --backup " +
+                (ConvertTo-PosixLiteral $EnvBackup)
+        }
         "Reset" { return "reset --server $serverLiteral" }
         "RestoreList" { return "restore --server $serverLiteral --list-json" }
         "Restore" {
@@ -5669,16 +5681,27 @@ function Invoke-PalworldSshManagementAction {
             $remote = Get-PalworldRemoteServerEnv -Connection $Connection -Owner $Owner -Server $Server
             $edited = Show-PalworldServerEnvEditor -Owner $Owner -Server $Server -Content $remote.Content
             if ($null -eq $edited) { return $false }
-            [void](Save-PalworldRemoteServerEnv `
+            $envBackup = Save-PalworldRemoteServerEnv `
                 -Connection $Connection -Owner $Owner -Server $Server `
-                -Content $edited.Content -ExpectedHash $remote.Hash)
+                -Content $edited.Content -ExpectedHash $remote.Hash
             if ($edited.Action -eq "Apply") {
-                Add-PalworldSshOutput "`r`n[START] Applying $Server.env with a safe container recreate...`r`n"
+                Add-PalworldSshOutput "`r`n[START] Validating and applying $Server.env with a lightweight safe container recreate...`r`n"
+                $script:PalworldSshCancelOperationButton.Enabled = $false
+                $script:PalworldSshNonCancelableTransaction = $true
+                $script:PalworldSshCancelOperationButton.Text = Get-PalworldLocalizedText `
+                    "Applying / restarting..." "적용 / 재시작 중..."
+                $script:PalworldSshLiveStatusLines += @(
+                    "[INFO] server.env apply and safe container recreation are in progress; this transaction cannot be canceled."
+                )
+                & $script:PalworldSshRenderStatusNotice
+                $arguments = New-PalworldManagerActionArguments `
+                    -Action EnvApply -Server $Server -EnvBackup ([string]$envBackup)
                 [void](Invoke-PalworldPackagedSshOperation `
-                    -Connection $Connection -Owner $Owner -Payload setup -TimeoutSeconds 3600 `
+                    -Connection $Connection -Owner $Owner -Payload manage -TimeoutSeconds 3600 `
                     -BuildCommand {
                         param($project, $tools)
-                        New-PalworldSetupCommand -Project $project -Tools $tools -Server $Server -Mode update
+                        New-PalworldManagerCommand `
+                            -Project $project -Tools $tools -Arguments $arguments
                     }.GetNewClosure())
                 $script:PalworldSshPostActionApiSyncMode = "Full"
                 $script:PalworldSshPostActionApiServer = $Server
@@ -6129,7 +6152,7 @@ function New-PalworldSshManagementPage {
     $actions = @(
         [pscustomobject]@{ Category = "Setup"; Id = "Setup"; Label = (Get-PalworldLocalizedText "Install and start a new server" "신규 서버 설치 및 시작"); Server = $false },
         [pscustomobject]@{ Category = "Setup"; Id = "Import"; Label = (Get-PalworldLocalizedText "Import an existing server" "기존 서버 가져오기"); Server = $false },
-        [pscustomobject]@{ Category = "Manage"; Id = "Update"; Label = (Get-PalworldLocalizedText "Update image and reapply settings" "이미지 갱신 및 설정 재적용"); Server = $true },
+        [pscustomobject]@{ Category = "Manage"; Id = "Update"; Label = (Get-PalworldLocalizedText "Update Docker image and reapply settings" "Docker 이미지 갱신 및 설정 재적용"); Server = $true },
         [pscustomobject]@{ Category = "Manage"; Id = "Reset"; Label = (Get-PalworldLocalizedText "Reset server world" "서버 월드 초기화"); Server = $true },
         [pscustomobject]@{ Category = "Manage"; Id = "Restore"; Label = (Get-PalworldLocalizedText "Restore server world" "서버 월드 복원"); Server = $true },
         [pscustomobject]@{ Category = "Manage"; Id = "TokenShow"; Label = (Get-PalworldLocalizedText "Show API token" "API token 확인"); Server = $true },

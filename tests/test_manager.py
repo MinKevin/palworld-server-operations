@@ -673,6 +673,218 @@ class InstallValidationTests(unittest.TestCase):
         self.assertIn("Docker-volume space", diagnostic or "")
         self.assertIsNone(manager.steamcmd_error_diagnostic("Success! App installed."))
 
+    def test_steam_distribution_access_failures_are_classified(self) -> None:
+        self.assertIn(
+            "Access Denied",
+            manager.steamcmd_distribution_failure(
+                "Error! App '2394010' state is 0x6 after update job.",
+                "Failed to get manifest request code, 'Access Denied'",
+            )
+            or "",
+        )
+        self.assertIn(
+            "Missing configuration",
+            manager.steamcmd_distribution_failure(
+                "ERROR! Failed to install app '2394010' (Missing configuration)"
+            )
+            or "",
+        )
+
+    def test_only_manifest_access_denied_triggers_stale_state_recovery(self) -> None:
+        self.assertTrue(
+            manager.steamcmd_stale_manifest_access_denied(
+                "Error! App '2394010' state is 0x6 after update job.",
+                "Failed to get manifest request code, 'Access Denied'",
+            )
+        )
+        self.assertFalse(
+            manager.steamcmd_stale_manifest_access_denied(
+                "ERROR! Failed to install app '2394010' (Missing configuration)"
+            )
+        )
+
+    def test_stale_manifest_access_denied_retries_with_current_depot_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "steamapps/appmanifest_2394010.acf"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text('"buildid" "100"', encoding="utf-8")
+            update_lock = root / "update-lock/steam-update.lock"
+            calls = 0
+
+            def run_steamcmd(_command: list[str], **_kwargs: object) -> int:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    self.assertTrue(manifest.is_file())
+                    return 8
+                self.assertFalse(manifest.exists())
+                manifest.write_text('"buildid" "200"', encoding="utf-8")
+                return 0
+
+            with mock.patch.dict(
+                os.environ,
+                {"STEAMCMD_BIN": "/usr/bin/steamcmd", "SERVER_INSTANCE": "server1"},
+            ), mock.patch.object(manager, "GAME_DIR", root), mock.patch.object(
+                manager, "APP_MANIFEST", manifest
+            ), mock.patch.object(
+                manager, "UPDATE_LOCK_FILE", update_lock
+            ), mock.patch.object(
+                manager, "POLICY_FILE", root / "policy/policy.json"
+            ), mock.patch.object(
+                manager, "missing_required_game_files", return_value=()
+            ), mock.patch.object(
+                manager, "run_logged_command", side_effect=run_steamcmd
+            ), mock.patch.object(
+                manager, "file_size_or_zero", return_value=0
+            ), mock.patch.object(
+                manager,
+                "read_log_since",
+                side_effect=[
+                    "Failed to get manifest request code, 'Access Denied'",
+                    "",
+                ],
+            ), mock.patch.object(
+                manager.shutil,
+                "disk_usage",
+                return_value=mock.Mock(
+                    free=20 * 1024**3,
+                    used=10 * 1024**3,
+                    total=30 * 1024**3,
+                ),
+            ), mock.patch.object(manager.time, "sleep"):
+                manager.install_or_update(force_update=True, update_lock_held=True)
+
+            self.assertEqual(calls, 2)
+            self.assertEqual(manager.installed_build_id(manifest), 200)
+            self.assertFalse(manager.steam_manifest_recovery_path().exists())
+
+    def test_failed_clean_manifest_retry_restores_previous_build_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "steamapps/appmanifest_2394010.acf"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text('"buildid" "100"', encoding="utf-8")
+            update_lock = root / "update-lock/steam-update.lock"
+
+            with mock.patch.dict(
+                os.environ,
+                {"STEAMCMD_BIN": "/usr/bin/steamcmd", "SERVER_INSTANCE": "server1"},
+            ), mock.patch.object(manager, "GAME_DIR", root), mock.patch.object(
+                manager, "APP_MANIFEST", manifest
+            ), mock.patch.object(
+                manager, "UPDATE_LOCK_FILE", update_lock
+            ), mock.patch.object(
+                manager, "POLICY_FILE", root / "policy/policy.json"
+            ), mock.patch.object(
+                manager, "missing_required_game_files", return_value=()
+            ), mock.patch.object(
+                manager, "run_logged_command", side_effect=[8, 8]
+            ) as run_command, mock.patch.object(
+                manager, "file_size_or_zero", return_value=0
+            ), mock.patch.object(
+                manager,
+                "read_log_since",
+                side_effect=[
+                    "Failed to get manifest request code, 'Access Denied'",
+                    "ERROR! Failed to install app '2394010' (Missing configuration)",
+                ],
+            ), mock.patch.object(
+                manager.shutil,
+                "disk_usage",
+                return_value=mock.Mock(
+                    free=20 * 1024**3,
+                    used=10 * 1024**3,
+                    total=30 * 1024**3,
+                ),
+            ), mock.patch.object(manager.time, "sleep"):
+                with self.assertRaises(manager.SteamUpdateDeferredError):
+                    manager.install_or_update(force_update=True, update_lock_held=True)
+
+            self.assertEqual(run_command.call_count, 2)
+            self.assertEqual(manager.installed_build_id(manifest), 100)
+            self.assertFalse(manager.steam_manifest_recovery_path().exists())
+
+    def test_interrupted_manifest_reset_restores_backup_when_current_state_is_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "steamapps/appmanifest_2394010.acf"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(
+                '"StateFlags" "1026"\n"buildid" "200"',
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                manager, "GAME_DIR", root
+            ), mock.patch.object(
+                manager, "APP_MANIFEST", manifest
+            ), mock.patch.object(
+                manager, "POLICY_FILE", root / "policy/policy.json"
+            ), mock.patch.object(
+                manager, "missing_required_game_files", return_value=()
+            ):
+                recovery = manager.steam_manifest_recovery_path()
+                recovery.parent.mkdir(parents=True)
+                recovery.write_text(
+                    '"StateFlags" "6"\n"buildid" "100"',
+                    encoding="utf-8",
+                )
+                manager.recover_interrupted_steam_manifest_reset()
+
+            self.assertEqual(manager.installed_build_id(manifest), 100)
+            self.assertFalse(recovery.exists())
+
+    def test_interrupted_manifest_reset_keeps_completed_current_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "steamapps/appmanifest_2394010.acf"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(
+                '"StateFlags" "4"\n"buildid" "200"',
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                manager, "GAME_DIR", root
+            ), mock.patch.object(
+                manager, "APP_MANIFEST", manifest
+            ), mock.patch.object(
+                manager, "POLICY_FILE", root / "policy/policy.json"
+            ), mock.patch.object(
+                manager, "missing_required_game_files", return_value=()
+            ):
+                recovery = manager.steam_manifest_recovery_path()
+                recovery.parent.mkdir(parents=True)
+                recovery.write_text(
+                    '"StateFlags" "6"\n"buildid" "100"',
+                    encoding="utf-8",
+                )
+                manager.recover_interrupted_steam_manifest_reset()
+
+            self.assertEqual(manager.installed_build_id(manifest), 200)
+            self.assertFalse(recovery.exists())
+
+    def test_known_steam_distribution_failure_is_not_retried_three_times(self) -> None:
+        def fail_with_missing_configuration(
+            _command: list[str], **kwargs: object
+        ) -> int:
+            captured = kwargs.get("captured_output")
+            assert isinstance(captured, list)
+            captured.append("ERROR! Failed to install app '2394010' (Missing configuration)")
+            return 8
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ,
+            {"STEAMCMD_BIN": "/usr/bin/steamcmd"},
+        ), mock.patch.object(manager, "GAME_DIR", Path(directory)), mock.patch.object(
+            manager, "missing_required_game_files", return_value=()
+        ), mock.patch.object(
+            manager, "run_logged_command", side_effect=fail_with_missing_configuration
+        ) as run_command:
+            with self.assertRaises(manager.SteamUpdateDeferredError):
+                manager.install_or_update(force_update=True, update_lock_held=True)
+
+        run_command.assert_called_once()
+
     def test_logged_command_stops_a_process_with_no_measurable_progress(self) -> None:
         result = manager.run_logged_command(
             [
@@ -714,7 +926,7 @@ class InstallValidationTests(unittest.TestCase):
             "run_logged_command",
             side_effect=[manager.STEAMCMD_STALLED_EXIT_CODE, 0],
         ) as run_command, mock.patch.object(manager.time, "sleep"):
-            manager.install_or_update()
+            manager.install_or_update(force_update=True)
 
         self.assertEqual(run_command.call_count, 2)
         self.assertEqual(run_command.call_args_list[0].kwargs["progress_timeout"], 120.0)
@@ -752,22 +964,76 @@ class InstallValidationTests(unittest.TestCase):
             manifest.write_text(content, encoding="utf-8")
             self.assertEqual(manager.installed_build_id(manifest), 12345678)
 
-    def test_update_check_response_reports_required_build(self) -> None:
-        up_to_date, required = manager.parse_update_check_response(
-            {
-                "response": {
-                    "success": True,
-                    "up_to_date": False,
-                    "required_version": 87654321,
-                }
-            }
+    def test_steamcmd_app_info_reports_public_build(self) -> None:
+        output = (
+            'Steam Console Client\n'
+            '"2394010"\n'
+            '{\n'
+            '  "depots"\n'
+            '  {\n'
+            '    "branches"\n'
+            '    {\n'
+            '      "public"\n'
+            '      {\n'
+            '        "buildid" "87654321"\n'
+            '      }\n'
+            '    }\n'
+            '  }\n'
+            '}\n'
         )
-        self.assertFalse(up_to_date)
-        self.assertEqual(required, 87654321)
+        self.assertEqual(manager.parse_available_build_id(output), 87654321)
 
-    def test_update_check_response_rejects_missing_status(self) -> None:
+    def test_steamcmd_app_info_rejects_missing_branch_build(self) -> None:
         with self.assertRaises(ValueError):
-            manager.parse_update_check_response({"response": {"success": True}})
+            manager.parse_available_build_id('"2394010"\n{\n"depots" { }\n}\n')
+
+    def test_update_check_compares_installed_and_available_build_ids(self) -> None:
+        with mock.patch.object(manager, "available_build_id", return_value=87654321):
+            self.assertEqual(
+                manager.check_steam_update(12345678),
+                (False, 87654321),
+            )
+            self.assertEqual(
+                manager.check_steam_update(87654321),
+                (True, 87654321),
+            )
+
+    def test_available_build_query_is_shared_through_the_host_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            manager,
+            "UPDATE_LOCK_FILE",
+            Path(directory) / "steam-update.lock",
+        ), mock.patch.object(
+            manager,
+            "query_available_build_id",
+            return_value=87654321,
+        ) as query:
+            first = manager.available_build_id(cache_seconds=60)
+            second = manager.available_build_id(cache_seconds=60)
+
+        self.assertEqual((first, second), (87654321, 87654321))
+        query.assert_called_once_with("public", timeout=manager.STEAM_APP_INFO_TIMEOUT_SECONDS)
+
+    def test_startup_metadata_failure_preserves_complete_installed_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ,
+            {"UPDATE_ON_START": "true"},
+        ), mock.patch.object(manager, "GAME_DIR", Path(directory)), mock.patch.object(
+            manager,
+            "missing_required_game_files",
+            return_value=(),
+        ), mock.patch.object(
+            manager,
+            "installed_build_id",
+            return_value=12345678,
+        ), mock.patch.object(
+            manager,
+            "check_steam_update",
+            side_effect=RuntimeError("Steam metadata unavailable"),
+        ), mock.patch.object(manager, "run_logged_command") as run_command:
+            manager.install_or_update()
+
+        run_command.assert_not_called()
 
 
 class SharedUpdateLockTests(unittest.TestCase):
@@ -819,6 +1085,10 @@ class SharedUpdateLockTests(unittest.TestCase):
             {"UPDATE_ON_START": "true", "STEAMCMD_BIN": "/usr/bin/steamcmd"},
         ), mock.patch.object(manager, "GAME_DIR", Path(directory)), mock.patch.object(
             manager, "missing_required_game_files", return_value=()
+        ), mock.patch.object(
+            manager, "installed_build_id", return_value=1
+        ), mock.patch.object(
+            manager, "check_steam_update", return_value=(False, 2)
         ), mock.patch.object(
             manager,
             "shared_update_lock",
@@ -937,6 +1207,55 @@ class SharedUpdateLockTests(unittest.TestCase):
         install.assert_called_once_with(force_update=True, update_lock_held=True)
         supervisor.start_server.assert_not_called()
 
+    def test_steam_distribution_failure_restarts_the_intact_installed_build(self) -> None:
+        supervisor = manager.Supervisor.__new__(manager.Supervisor)
+        supervisor.instance = "server1"
+        supervisor.update_in_progress = False
+        supervisor.update_waiting_for_lock = None
+        supervisor.update_waiting_for_lock_waittime = None
+        supervisor.update_waiting_for_restart_announcement = False
+        supervisor.update_warning_seconds = 0
+        supervisor.update_warning_message = "Restarting in {time}"
+        supervisor.restart_countdown_message = "Restarting in {seconds} seconds"
+        supervisor.update_retry_interval = 300
+        supervisor.proc = None
+        supervisor.terminate_requested = False
+        supervisor.phase = "running"
+        supervisor.reason = "test"
+        supervisor.available_build = 2
+        supervisor.installed_build = 1
+        supervisor.last_update_error = None
+        supervisor.update_blocked = False
+        supervisor.next_update_check_monotonic = 0.0
+        supervisor.write_status = mock.Mock()
+        supervisor.desired_state = mock.Mock(return_value=(True, "inside active window"))
+        supervisor.start_server = mock.Mock()
+        supervisor.disruptive_action_blocked_by_policy = mock.Mock(return_value=False)
+        lock = mock.MagicMock()
+        lock.__enter__.return_value = manager.UpdateLockState(True)
+        deferred = manager.SteamUpdateDeferredError(
+            "Steam manifest access denied",
+            return_code=8,
+        )
+
+        with mock.patch.object(manager, "shared_update_lock", return_value=lock), mock.patch.object(
+            manager, "install_or_update", side_effect=deferred
+        ), mock.patch.object(manager, "prepare_game_files"), mock.patch.object(
+            manager, "installed_build_id", return_value=1
+        ), mock.patch.object(manager.time, "monotonic", return_value=100.0):
+            supervisor.perform_update("automatic update detected", waittime=0)
+
+        self.assertFalse(supervisor.update_blocked)
+        self.assertEqual(supervisor.last_update_error, "Steam manifest access denied")
+        self.assertEqual(
+            supervisor.next_update_check_monotonic,
+            100.0 + manager.STEAM_DISTRIBUTION_RETRY_SECONDS,
+        )
+        supervisor.start_server.assert_called_once_with(
+            "Steam update deferred; inside active window",
+            update_before_start=False,
+        )
+
     def test_manual_update_waiting_for_lock_retries_even_when_auto_update_is_disabled(self) -> None:
         supervisor = manager.Supervisor.__new__(manager.Supervisor)
         supervisor.update_in_progress = False
@@ -951,7 +1270,9 @@ class SharedUpdateLockTests(unittest.TestCase):
             supervisor.check_automatic_update()
 
         supervisor.perform_update.assert_called_once_with(
-            "manual update requested", waittime=0
+            "manual update requested",
+            waittime=0,
+            restart_announcement=False,
         )
 
     def test_lock_wait_status_is_json_serializable_without_exposing_internal_reason(self) -> None:
@@ -990,6 +1311,8 @@ class UpdateControlTests(unittest.TestCase):
 
     def test_restart_uses_shared_warning_and_countdown(self) -> None:
         supervisor = manager.Supervisor.__new__(manager.Supervisor)
+        supervisor.proc = mock.Mock()
+        supervisor.proc.poll.return_value = None
         supervisor.restart_warning_seconds = 60
         supervisor.restart_warning_message = "{time} 뒤 서버가 재시작됩니다."
         supervisor.restart_countdown_message = "서버 재시작까지 {seconds}초"
@@ -997,7 +1320,8 @@ class UpdateControlTests(unittest.TestCase):
         supervisor.desired_state = mock.Mock(return_value=(True, "manual override"))
         supervisor.start_server = mock.Mock()
 
-        self.assertTrue(supervisor.restart_server("manual restart requested"))
+        with mock.patch.dict(os.environ, {"UPDATE_ON_START": "false"}):
+            self.assertTrue(supervisor.restart_server("manual restart requested"))
         supervisor.stop_server.assert_called_once_with(
             "manual restart requested",
             waittime=60,
@@ -1006,7 +1330,111 @@ class UpdateControlTests(unittest.TestCase):
             final_message=manager.FINAL_RESTART_MESSAGE,
             require_graceful=True,
         )
-        supervisor.start_server.assert_called_once_with("manual restart requested")
+        supervisor.start_server.assert_called_once_with(
+            "manual restart requested",
+            update_before_start=False,
+        )
+
+    def test_restart_checks_steamcmd_when_update_on_start_is_enabled(self) -> None:
+        supervisor = manager.Supervisor.__new__(manager.Supervisor)
+        supervisor.proc = mock.Mock()
+        supervisor.proc.poll.return_value = None
+        supervisor.restart_warning_seconds = 60
+        supervisor.perform_update = mock.Mock()
+
+        with mock.patch.dict(os.environ, {"UPDATE_ON_START": "true"}):
+            self.assertTrue(supervisor.restart_server("manual restart requested"))
+
+        supervisor.perform_update.assert_called_once_with(
+            "SteamCMD pre-start check: manual restart requested",
+            waittime=60,
+            restart_announcement=True,
+        )
+
+    def test_advanced_start_runs_steamcmd_before_starting_a_stopped_server(self) -> None:
+        supervisor = manager.Supervisor.__new__(manager.Supervisor)
+        supervisor.proc = None
+        supervisor.restart_warning_seconds = 60
+        supervisor.perform_update = mock.Mock()
+
+        with mock.patch.dict(os.environ, {"UPDATE_ON_START": "true"}):
+            self.assertTrue(
+                supervisor.start_or_restart_server(
+                    "manual start requested",
+                    restart=False,
+                    waittime=0,
+                )
+            )
+
+        supervisor.perform_update.assert_called_once_with(
+            "SteamCMD pre-start check: manual start requested",
+            waittime=0,
+            restart_announcement=False,
+        )
+
+    def test_advanced_start_is_idempotent_when_server_is_already_running(self) -> None:
+        supervisor = manager.Supervisor.__new__(manager.Supervisor)
+        supervisor.proc = mock.Mock()
+        supervisor.proc.poll.return_value = None
+        supervisor.perform_update = mock.Mock()
+
+        with mock.patch.dict(os.environ, {"UPDATE_ON_START": "true"}):
+            self.assertTrue(
+                supervisor.start_or_restart_server(
+                    "manual start requested",
+                    restart=False,
+                    waittime=0,
+                )
+            )
+
+        supervisor.perform_update.assert_not_called()
+
+    def test_pending_prestart_update_cannot_be_bypassed_by_reconcile(self) -> None:
+        supervisor = manager.Supervisor.__new__(manager.Supervisor)
+        supervisor.policy_error = None
+        supervisor.proc = None
+        supervisor.update_blocked = False
+        supervisor.update_waiting_for_lock = "SteamCMD pre-start check: manual start requested"
+        supervisor.update_in_progress = False
+        supervisor.next_start_monotonic = 0.0
+        supervisor.start_server = mock.Mock()
+
+        supervisor.reconcile_game_state(True, "manual override", game_running=False)
+
+        supervisor.start_server.assert_not_called()
+
+    def test_prestart_build_mismatch_runs_update_before_game_launch(self) -> None:
+        supervisor = manager.Supervisor.__new__(manager.Supervisor)
+        supervisor.update_retry_interval = 300
+        supervisor.perform_update = mock.Mock()
+        supervisor.last_update_error = None
+        supervisor.available_build = None
+        supervisor.installed_build = None
+
+        with mock.patch.object(
+            manager,
+            "installed_build_id",
+            return_value=12345678,
+        ), mock.patch.object(
+            manager,
+            "check_steam_update",
+            return_value=(False, 87654321),
+        ):
+            required = supervisor.update_required_before_game_start(
+                "manual start requested",
+                waittime=0,
+                restart_announcement=False,
+                force_refresh=True,
+            )
+
+        self.assertTrue(required)
+        self.assertEqual(supervisor.installed_build, 12345678)
+        self.assertEqual(supervisor.available_build, 87654321)
+        supervisor.perform_update.assert_called_once_with(
+            "pre-start update detected: manual start requested",
+            waittime=0,
+            restart_announcement=False,
+        )
 
     def test_update_stop_announces_then_saves_and_shuts_down(self) -> None:
         supervisor = manager.Supervisor.__new__(manager.Supervisor)
@@ -1152,6 +1580,7 @@ class UpdateControlTests(unittest.TestCase):
         supervisor.shutdown_warning_seconds = 60
         supervisor.active_window = None
         supervisor.set_policy = mock.Mock()
+        supervisor.start_or_restart_server = mock.Mock(return_value=True)
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             manager, "COMMANDS_DIR", Path(directory)
@@ -1161,6 +1590,11 @@ class UpdateControlTests(unittest.TestCase):
 
         supervisor.set_policy.assert_called_once_with("auto", until=None)
         self.assertEqual(supervisor.reason, "manual start requested")
+        supervisor.start_or_restart_server.assert_called_once_with(
+            "manual start requested",
+            restart=False,
+            waittime=0,
+        )
 
     def test_reset_stop_uses_reset_message_and_holds_stopped_policy(self) -> None:
         supervisor = manager.Supervisor.__new__(manager.Supervisor)
