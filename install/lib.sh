@@ -32,7 +32,7 @@ PALWORLD_PROJECT_GID="$(stat -c '%g' -- "$PALWORLD_PROJECT_DIR")"
 PALWORLD_UID="$(select_palworld_runtime_id "$PALWORLD_PROJECT_UID" "${SUDO_UID:-}")"
 PALWORLD_GID="$(select_palworld_runtime_id "$PALWORLD_PROJECT_GID" "${SUDO_GID:-}")"
 PALWORLD_IMAGE="local/palworld-dedicated-server:uid${PALWORLD_UID}-gid${PALWORLD_GID}"
-PALWORLD_RUNTIME_LAYOUT="policy-bind-v1+update-lock-v1"
+PALWORLD_RUNTIME_LAYOUT="policy-bind-v1+update-lock-v1+steam-state-v1"
 PALWORLD_RUNTIME_DIR="$PALWORLD_PROJECT_DIR/runtime"
 PALWORLD_COMPOSE_FILE="$PALWORLD_RUNTIME_DIR/compose.yaml"
 PALWORLD_PROJECT_OPERATION_LOCK_FD=""
@@ -321,7 +321,7 @@ require_current_image_runtime_layout_for_token_rotation() {
         return 1
     fi
     if [[ "$actual_layout" != "$PALWORLD_RUNTIME_LAYOUT" ]]; then
-        echo "오류: 현재 서버 이미지는 영구 운영 정책과 공유 update lock을 지원하는 최신 runtime layout이 아닙니다." >&2
+        echo "오류: 현재 서버 이미지는 영구 운영 정책, 공유 update lock, SteamCMD 상태 보존을 지원하는 최신 runtime layout이 아닙니다." >&2
         echo "안전상 컨테이너·설정·token을 변경하지 않았습니다." >&2
         echo "먼저 Manage → 기존 서버 이미지 갱신·설정 재적용을 완료한 뒤 token 재발급을 다시 실행하세요." >&2
         return 1

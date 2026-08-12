@@ -254,6 +254,17 @@ ensure_server_volume() {
         "$server_volume" >/dev/null
 }
 
+ensure_steam_volume() {
+    local server="$1"
+    local steam_volume="palworld-$server-steam"
+    docker volume create \
+        --label io.palworld.manager=palworld-docker \
+        --label "io.palworld.instance=$server" \
+        --label "io.palworld.project-dir=$PALWORLD_PROJECT_DIR" \
+        --label io.palworld.role=steam-state \
+        "$steam_volume" >/dev/null
+}
+
 preflight_server_volume_space() {
     local server="$1"
     local server_volume="palworld-$server-server"
@@ -320,6 +331,7 @@ prepare_server_data() {
     local container="palworld-$server"
     local legacy_volume="palworld-$server-data"
     local server_volume="palworld-$server-server"
+    local steam_volume="palworld-$server-steam"
     local data_dir="$PALWORLD_PROJECT_DIR/data/$server"
     local saved_dir="$data_dir/saved"
     local logs_dir="$data_dir/logs"
@@ -437,6 +449,7 @@ print(game)
     fi
 
     ensure_server_volume "$server"
+    ensure_steam_volume "$server"
     if ! docker run --rm \
         --user 0:0 \
         --entrypoint /bin/sh \
@@ -452,6 +465,16 @@ print(game)
         "$PALWORLD_IMAGE" \
         -c "set -eu; mkdir -p /volume/Pal/Saved; chown -R $PALWORLD_UID:$PALWORLD_GID /volume"
 
+    # Mounting the named volume at Steam's real home path copies the image's
+    # bootstrapped SteamCMD state on first use. Keeping it per server preserves
+    # package metadata and client configuration across container recreation.
+    docker run --rm \
+        --user "$PALWORLD_UID:$PALWORLD_GID" \
+        --entrypoint /bin/sh \
+        --volume "$steam_volume:/home/palworld/.local/share/Steam" \
+        "$PALWORLD_IMAGE" \
+        -c 'set -eu; test -x /home/palworld/.local/share/Steam/steamcmd/steamcmd.sh; printf "steam-ok\n" > /home/palworld/.local/share/Steam/.manager-steam-test; grep -qx steam-ok /home/palworld/.local/share/Steam/.manager-steam-test; rm /home/palworld/.local/share/Steam/.manager-steam-test'
+
     chown -R "$PALWORLD_UID:$PALWORLD_GID" "$data_dir" "$policy_dir"
     chmod 0700 "$data_dir" "$saved_dir" "$logs_dir"
     echo "$server 서버 볼륨 및 Saved bind mount 쓰기 사전 검사를 실행합니다."
@@ -459,6 +482,7 @@ print(game)
         --user "$PALWORLD_UID:$PALWORLD_GID" \
         --entrypoint /bin/sh \
         --volume "$server_volume:/palworld/server" \
+        --volume "$steam_volume:/home/palworld/.local/share/Steam" \
         --volume "$saved_dir:/palworld/server/Pal/Saved" \
         --volume "$logs_dir:/palworld/logs" \
         --volume "$policy_dir:/palworld/policy" \
@@ -466,6 +490,7 @@ print(game)
         -c 'set -eu; printf "volume-ok\n" > /palworld/server/.manager-volume-test; grep -qx volume-ok /palworld/server/.manager-volume-test; rm /palworld/server/.manager-volume-test; rmdir /palworld/server/Pal/.manager-pal-test 2>/dev/null || true; mkdir /palworld/server/Pal/.manager-pal-test; rmdir /palworld/server/Pal/.manager-pal-test; printf "saved-ok\n" > /palworld/server/Pal/Saved/.manager-bind-test; grep -qx saved-ok /palworld/server/Pal/Saved/.manager-bind-test; rm /palworld/server/Pal/Saved/.manager-bind-test; printf "logs-ok\n" > /palworld/logs/.manager-log-test; grep -qx logs-ok /palworld/logs/.manager-log-test; rm /palworld/logs/.manager-log-test; printf "policy-ok\n" > /palworld/policy/.manager-policy-test; grep -qx policy-ok /palworld/policy/.manager-policy-test; rm /palworld/policy/.manager-policy-test'
 
     echo "$server 서버 파일 볼륨 준비 완료: $server_volume"
+    echo "$server SteamCMD 상태 볼륨 준비 완료: $steam_volume"
     if [[ "$server_files_missing" == true ]]; then
         echo "[INFO] $server 게임 파일이 아직 없는 볼륨입니다. 가져온 Pal/Saved와 별개로 SteamCMD가 팰월드 서버 파일 전체를 설치합니다."
     fi
@@ -518,6 +543,7 @@ echo "$server 설정을 검사합니다."
 python3 -B "$PALWORLD_INSTALL_DIR/scripts/doctor.py" --config-only --server "$server"
 
 ensure_server_volume "$server"
+ensure_steam_volume "$server"
 echo "팰월드 서버 이미지를 빌드합니다."
 docker build \
     --pull \

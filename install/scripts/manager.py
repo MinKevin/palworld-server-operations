@@ -14,9 +14,6 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -65,11 +62,12 @@ DEFAULT_CONFIG = GAME_DIR / "DefaultPalWorldSettings.ini"
 SERVER_CONFIG = GAME_DIR / "Pal/Saved/Config/LinuxServer/PalWorldSettings.ini"
 SERVER_SCRIPT = GAME_DIR / "PalServer.sh"
 APP_MANIFEST = GAME_DIR / "steamapps" / f"appmanifest_{APP_ID}.acf"
-STEAM_UPDATE_CHECK_URL = "https://api.steampowered.com/ISteamApps/UpToDateCheck/v1/"
 UPDATE_LOCK_FILE = Path(
     os.getenv("UPDATE_LOCK_FILE", "/palworld/update-lock/steam-update.lock")
 )
 UPDATE_LOCK_RETRY_SECONDS = 15.0
+STEAM_BUILD_CACHE_SECONDS = 60.0
+STEAM_APP_INFO_TIMEOUT_SECONDS = 90.0
 STATUS_WRITE_ERROR_LOG_INTERVAL_SECONDS = 60.0
 SCHEDULED_RESTART_MIN_UPTIME = 60.0
 STEAMCMD_STALLED_EXIT_CODE = 124
@@ -791,37 +789,191 @@ def installed_build_id(manifest: Path | None = None) -> int:
     raise RuntimeError("Steam app manifest is unavailable or invalid: " + "; ".join(errors))
 
 
-def parse_update_check_response(payload: object) -> tuple[bool, int | None]:
-    if not isinstance(payload, dict) or not isinstance(payload.get("response"), dict):
-        raise ValueError("Steam update response is missing the response object")
-    response = payload["response"]
-    if response.get("success") is False:
-        raise ValueError(f"Steam update check failed: {response.get('message', 'unknown error')}")
-    if not isinstance(response.get("up_to_date"), bool):
-        raise ValueError("Steam update response is missing up_to_date")
-    required_version = response.get("required_version")
-    try:
-        required_build = int(required_version) if required_version is not None and required_version != "" else None
-    except (TypeError, ValueError) as error:
-        raise ValueError(f"invalid required_version in Steam update response: {required_version!r}") from error
-    return response["up_to_date"], required_build
+_KEYVALUES_TOKEN_RE = re.compile(r'"((?:\\.|[^"\\])*)"|([{}])')
 
 
-def check_steam_update(version: int, timeout: float = 10.0) -> tuple[bool, int | None]:
-    query = urllib.parse.urlencode({"appid": APP_ID, "version": version})
-    request = urllib.request.Request(
-        f"{STEAM_UPDATE_CHECK_URL}?{query}",
-        headers={"Accept": "application/json", "User-Agent": "palworld-docker-manager/1"},
+def build_steamcmd_app_info_command(steamcmd: str) -> list[str]:
+    """Build the authoritative public-build metadata query for this Steam app."""
+    return [
+        steamcmd,
+        "+login",
+        "anonymous",
+        "+app_info_update",
+        "1",
+        "+app_info_print",
+        APP_ID,
+        "+quit",
+    ]
+
+
+def _parse_keyvalues_object(tokens: list[str], index: int) -> tuple[dict[str, Any], int]:
+    if index >= len(tokens) or tokens[index] != "{":
+        raise ValueError("Steam app info is missing an opening object")
+    index += 1
+    parsed: dict[str, Any] = {}
+    while index < len(tokens):
+        if tokens[index] == "}":
+            return parsed, index + 1
+        key = tokens[index]
+        if key == "{":
+            raise ValueError("Steam app info contains an unexpected object")
+        index += 1
+        if index >= len(tokens):
+            break
+        if tokens[index] == "{":
+            value, index = _parse_keyvalues_object(tokens, index)
+        elif tokens[index] == "}":
+            raise ValueError(f"Steam app info is missing a value for {key!r}")
+        else:
+            value = tokens[index]
+            index += 1
+        parsed[key] = value
+    raise ValueError("Steam app info object is incomplete")
+
+
+def parse_available_build_id(content: str, branch: str = "public") -> int:
+    """Read one branch BuildID from SteamCMD ``app_info_print`` output."""
+    app_line = re.search(
+        rf'(?m)^[\t ]*"{re.escape(APP_ID)}"[\t ]*\r?$',
+        content,
     )
+    if not app_line:
+        raise ValueError(f"Steam app info does not contain app {APP_ID}")
+    tokens = [
+        match.group(1) if match.group(1) is not None else str(match.group(2))
+        for match in _KEYVALUES_TOKEN_RE.finditer(content, app_line.start())
+    ]
+    if len(tokens) < 2 or tokens[0] != APP_ID:
+        raise ValueError(f"Steam app info does not start with app {APP_ID}")
+    app, _next_index = _parse_keyvalues_object(tokens, 1)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"Steam update check request failed: {error}") from error
+        build_text = app["depots"]["branches"][branch]["buildid"]
+        build_id = int(str(build_text))
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            f"Steam app info does not contain a valid buildid for branch {branch!r}"
+        ) from error
+    if build_id <= 0:
+        raise ValueError(
+            f"Steam app info contains a non-positive buildid for branch {branch!r}"
+        )
+    return build_id
+
+
+def steam_build_cache_file() -> Path:
+    return UPDATE_LOCK_FILE.parent / f"steam-app-{APP_ID}-build.json"
+
+
+def _read_cached_available_build(
+    branch: str,
+    *,
+    max_age: float,
+    now: float | None = None,
+) -> int | None:
     try:
-        return parse_update_check_response(payload)
+        payload = json.loads(steam_build_cache_file().read_text(encoding="utf-8"))
+        checked_epoch = float(payload["checked_epoch"])
+        build_id = int(payload["build_id"])
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    current_epoch = time.time() if now is None else now
+    age = current_epoch - checked_epoch
+    if (
+        payload.get("app_id") != APP_ID
+        or payload.get("branch") != branch
+        or build_id <= 0
+        or age < 0
+        or age > max_age
+    ):
+        return None
+    return build_id
+
+
+def _write_cached_available_build(branch: str, build_id: int) -> None:
+    atomic_write_json(
+        steam_build_cache_file(),
+        {
+            "app_id": APP_ID,
+            "branch": branch,
+            "build_id": build_id,
+            "checked_epoch": time.time(),
+        },
+    )
+
+
+def query_available_build_id(
+    branch: str = "public",
+    *,
+    timeout: float = STEAM_APP_INFO_TIMEOUT_SECONDS,
+) -> int:
+    """Ask SteamCMD for the branch BuildID without touching installed game files."""
+    steamcmd = os.getenv("STEAMCMD_BIN") or shutil.which("steamcmd") or "/usr/bin/steamcmd"
+    command = build_steamcmd_app_info_command(steamcmd)
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=max(10.0, timeout),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(f"SteamCMD app-info query failed: {error}") from error
+    if result.returncode != 0:
+        detail = " | ".join(result.stdout.strip().splitlines()[-3:])
+        raise RuntimeError(
+            f"SteamCMD app-info query exited with code {result.returncode}"
+            + (f": {detail[:500]}" if detail else "")
+        )
+    try:
+        return parse_available_build_id(result.stdout, branch)
     except ValueError as error:
         raise RuntimeError(str(error)) from error
+
+
+def available_build_id(
+    branch: str = "public",
+    *,
+    force_refresh: bool = False,
+    cache_seconds: float = STEAM_BUILD_CACHE_SECONDS,
+    timeout: float = STEAM_APP_INFO_TIMEOUT_SECONDS,
+) -> int:
+    """Return one host-cached Steam BuildID and avoid per-container query storms."""
+    if not force_refresh:
+        cached = _read_cached_available_build(branch, max_age=max(0.0, cache_seconds))
+        if cached is not None:
+            return cached
+
+    with shared_update_lock(blocking=False) as lock_state:
+        if not lock_state.acquired:
+            if lock_state.error is not None:
+                raise RuntimeError(lock_state.error)
+            raise RuntimeError("another Palworld server is using the shared Steam update lock")
+        if not force_refresh:
+            cached = _read_cached_available_build(branch, max_age=max(0.0, cache_seconds))
+            if cached is not None:
+                return cached
+        build_id = query_available_build_id(branch, timeout=timeout)
+        _write_cached_available_build(branch, build_id)
+        return build_id
+
+
+def check_steam_update(
+    version: int,
+    timeout: float = STEAM_APP_INFO_TIMEOUT_SECONDS,
+    *,
+    force_refresh: bool = False,
+) -> tuple[bool, int]:
+    branch = os.getenv("STEAM_BETA", "").strip() or "public"
+    required_build = available_build_id(
+        branch,
+        force_refresh=force_refresh,
+        timeout=timeout,
+    )
+    return version == required_build, required_build
 
 
 _LOGGED_COMMAND_EOF = object()
@@ -990,6 +1142,26 @@ def install_or_update(*, force_update: bool = False, update_lock_held: bool = Fa
 
     if missing_before and not should_update:
         log("required game files are missing; UPDATE_ON_START=false is ignored for automatic repair")
+
+    if should_update and not force_update and not missing_before:
+        try:
+            current_build = installed_build_id()
+            up_to_date, required_build = check_steam_update(current_build)
+        except (RuntimeError, ValueError) as error:
+            # A Steam metadata outage must not turn a healthy installed server
+            # into a container restart loop. Runtime checks will retry later.
+            log(
+                "Steam startup update check warning; existing game files will be used "
+                f"and the supervisor will retry later: {error}"
+            )
+            return
+        if up_to_date:
+            log(f"Steam startup build check: installed build {current_build} is current")
+            return
+        log(
+            f"Steam startup update detected: installed build={current_build}, "
+            f"available build={required_build}"
+        )
 
     steamcmd = os.getenv("STEAMCMD_BIN") or shutil.which("steamcmd") or "/usr/bin/steamcmd"
     beta = os.getenv("STEAM_BETA", "").strip()
@@ -1164,12 +1336,6 @@ class Supervisor:
         )
         self.auto_update_enabled = parse_bool(os.getenv("AUTO_UPDATE_ENABLED"), True)
         self.auto_update_disabled_reason: str | None = None
-        steam_beta = os.getenv("STEAM_BETA", "").strip()
-        if self.auto_update_enabled and steam_beta:
-            self.auto_update_enabled = False
-            self.auto_update_disabled_reason = (
-                f"automatic build detection is unavailable for Steam beta branch {steam_beta!r}"
-            )
         self.update_check_interval = max(60.0, parse_duration(os.getenv("UPDATE_CHECK_INTERVAL", "15m")))
         self.update_retry_interval = max(60.0, parse_duration(os.getenv("UPDATE_RETRY_INTERVAL", "5m")))
         self.update_warning_seconds = max(
@@ -1194,12 +1360,14 @@ class Supervisor:
         self.update_blocked = False
         self.update_waiting_for_lock: str | None = None
         self.update_waiting_for_lock_waittime: int | None = None
+        self.update_waiting_for_restart_announcement = False
         self.next_update_check_monotonic = time.monotonic() + self.update_check_interval
         self.installed_build: int | None = None
         self.available_build: int | None = None
         self.last_update_check_at: str | None = None
         self.last_update_at: str | None = None
         self.last_update_error: str | None = None
+        self.last_prestart_update_check_monotonic = 0.0
         self.policy_error: str | None = None
         self.policy_write_error: str | None = None
         self.status_write_error: str | None = None
@@ -1489,7 +1657,68 @@ class Supervisor:
                     flush=True,
                 )
 
-    def start_server(self, reason: str) -> None:
+    def update_required_before_game_start(
+        self,
+        reason: str,
+        *,
+        waittime: int,
+        restart_announcement: bool,
+        force_refresh: bool,
+    ) -> bool:
+        """Check the authoritative branch BuildID before stopping or starting a game."""
+        self.last_update_check_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        self.last_prestart_update_check_monotonic = time.monotonic()
+        try:
+            current_build = installed_build_id()
+        except RuntimeError as error:
+            log(
+                "installed Steam build cannot be verified before game start; "
+                f"SteamCMD repair is required: {error}"
+            )
+            self.perform_update(
+                f"pre-start repair: {reason}",
+                waittime=waittime,
+                restart_announcement=restart_announcement,
+            )
+            return True
+
+        try:
+            up_to_date, required_build = check_steam_update(
+                current_build,
+                force_refresh=force_refresh,
+            )
+        except (RuntimeError, ValueError) as error:
+            # Availability wins when Steam's metadata service is temporarily
+            # unavailable. The running build is preserved and runtime checks retry.
+            self.installed_build = current_build
+            self.last_update_error = str(error)
+            self.next_update_check_monotonic = (
+                time.monotonic() + min(60.0, self.update_retry_interval)
+            )
+            log(
+                "Steam pre-start update check warning; starting the intact installed "
+                f"build and retrying later: {error}"
+            )
+            return False
+
+        self.installed_build = current_build
+        self.available_build = None if up_to_date else required_build
+        self.last_update_error = None
+        if up_to_date:
+            log(f"Steam pre-start build check: installed build {current_build} is current")
+            return False
+        log(
+            f"Steam pre-start update detected: installed build={current_build}, "
+            f"available build={required_build}"
+        )
+        self.perform_update(
+            f"pre-start update detected: {reason}",
+            waittime=waittime,
+            restart_announcement=restart_announcement,
+        )
+        return True
+
+    def start_server(self, reason: str, *, update_before_start: bool = True) -> None:
         if self.proc is not None and self.proc.poll() is None:
             return
         if self.disruptive_action_blocked_by_policy("game start"):
@@ -1498,6 +1727,17 @@ class Supervisor:
         if self.update_blocked:
             log("game server start is blocked until the failed update is repaired")
             return
+        if update_before_start and parse_bool(os.getenv("UPDATE_ON_START"), True):
+            last_check = getattr(self, "last_prestart_update_check_monotonic", 0.0)
+            if time.monotonic() - last_check >= 30.0:
+                log(f"checking Steam updates before game start ({reason})")
+                if self.update_required_before_game_start(
+                    reason,
+                    waittime=0,
+                    restart_announcement=False,
+                    force_refresh=False,
+                ):
+                    return
         command = [str(SERVER_SCRIPT), f"-port={os.getenv('SERVER_PORT', '8211')}"]
         if parse_bool(os.getenv("COMMUNITY_SERVER"), False):
             command.append("-publiclobby")
@@ -1708,6 +1948,14 @@ class Supervisor:
         if self.disruptive_action_blocked_by_policy("game restart"):
             return False
         waittime = self.restart_warning_seconds if waittime is None else max(0, waittime)
+        if parse_bool(os.getenv("UPDATE_ON_START"), True):
+            if self.update_required_before_game_start(
+                reason,
+                waittime=waittime,
+                restart_announcement=True,
+                force_refresh=True,
+            ):
+                return True
         warning = render_timed_message(self.restart_warning_message, waittime)
         stopped = self.stop_server(
             reason,
@@ -1720,16 +1968,23 @@ class Supervisor:
         if stopped:
             desired, desired_reason = self.desired_state(datetime.now().astimezone())
             if desired:
-                self.start_server(reason)
+                self.start_server(reason, update_before_start=False)
             else:
                 self.phase = "stopped"
                 self.reason = desired_reason
         return stopped
 
-    def perform_update(self, reason: str, waittime: int | None = None) -> None:
+    def perform_update(
+        self,
+        reason: str,
+        waittime: int | None = None,
+        *,
+        restart_announcement: bool = False,
+    ) -> None:
         if self.disruptive_action_blocked_by_policy("server update"):
             self.update_waiting_for_lock = None
             self.update_waiting_for_lock_waittime = None
+            self.update_waiting_for_restart_announcement = False
             self.last_update_error = self.reason
             return
         if self.update_in_progress:
@@ -1739,19 +1994,20 @@ class Supervisor:
             if not lock_state.acquired:
                 self.update_waiting_for_lock = reason
                 self.update_waiting_for_lock_waittime = waittime
+                self.update_waiting_for_restart_announcement = restart_announcement
                 self.next_update_check_monotonic = (
                     time.monotonic() + UPDATE_LOCK_RETRY_SECONDS
                 )
                 if lock_state.error is not None:
                     self.last_update_error = lock_state.error
                     log(
-                        f"{lock_state.error}; {self.instance} remains running and will retry in "
+                        f"{lock_state.error}; {self.instance} game state is preserved and will retry in "
                         f"{UPDATE_LOCK_RETRY_SECONDS:g}s"
                     )
                 else:
                     log(
                         "another Palworld server owns the shared host update lock; "
-                        f"{self.instance} remains running and will retry in "
+                        f"{self.instance} game state is preserved and will retry in "
                         f"{UPDATE_LOCK_RETRY_SECONDS:g}s"
                     )
                 self.write_status()
@@ -1762,16 +2018,26 @@ class Supervisor:
             # another server can never be stopped merely to wait for this one.
             self.update_waiting_for_lock = None
             self.update_waiting_for_lock_waittime = None
+            self.update_waiting_for_restart_announcement = False
             self.update_in_progress = True
             try:
                 if self.proc is not None and self.proc.poll() is None:
-                    warning = render_timed_message(self.update_warning_message, waittime)
+                    warning_template = (
+                        self.restart_warning_message
+                        if restart_announcement
+                        else self.update_warning_message
+                    )
+                    warning = render_timed_message(warning_template, waittime)
                     if not self.stop_server(
                         reason,
                         waittime=waittime,
                         message=warning,
                         countdown_message=self.restart_countdown_message,
-                        final_message=FINAL_UPDATE_MESSAGE,
+                        final_message=(
+                            FINAL_RESTART_MESSAGE
+                            if restart_announcement
+                            else FINAL_UPDATE_MESSAGE
+                        ),
                         require_graceful=True,
                     ):
                         self.last_update_error = "graceful shutdown unavailable; update postponed"
@@ -1800,6 +2066,13 @@ class Supervisor:
                 self.last_update_at = datetime.now().astimezone().isoformat(timespec="seconds")
                 self.last_update_error = None
                 self.update_blocked = False
+                self.last_prestart_update_check_monotonic = time.monotonic()
+                if self.installed_build is not None:
+                    branch = os.getenv("STEAM_BETA", "").strip() or "public"
+                    try:
+                        _write_cached_available_build(branch, self.installed_build)
+                    except OSError as error:
+                        log(f"Steam build cache could not be updated: {error}")
                 self.next_update_check_monotonic = time.monotonic() + self.update_check_interval
                 self.phase = "stopped"
                 self.reason = "update completed"
@@ -1807,7 +2080,10 @@ class Supervisor:
 
                 desired, desired_reason = self.desired_state(datetime.now().astimezone())
                 if desired:
-                    self.start_server(f"update completed; {desired_reason}")
+                    self.start_server(
+                        f"update completed; {desired_reason}",
+                        update_before_start=False,
+                    )
             except Exception as error:
                 self.update_blocked = True
                 self.phase = "update-failed"
@@ -1831,6 +2107,7 @@ class Supervisor:
                 )
                 self.update_waiting_for_lock = None
                 self.update_waiting_for_lock_waittime = None
+                self.update_waiting_for_restart_announcement = False
             return
         if self.update_in_progress or time.monotonic() < self.next_update_check_monotonic:
             return
@@ -1838,6 +2115,11 @@ class Supervisor:
             self.perform_update(
                 self.update_waiting_for_lock,
                 waittime=self.update_waiting_for_lock_waittime,
+                restart_announcement=getattr(
+                    self,
+                    "update_waiting_for_restart_announcement",
+                    False,
+                ),
             )
             return
         if self.update_blocked:
@@ -1864,6 +2146,9 @@ class Supervisor:
             self.perform_update("automatic update detected")
         except (RuntimeError, ValueError) as error:
             self.last_update_error = str(error)
+            self.next_update_check_monotonic = (
+                time.monotonic() + min(60.0, self.update_retry_interval)
+            )
             log(f"Steam update check warning; game continues running: {error}")
 
     def apply_start_request_policy(self, now: datetime) -> bool:
@@ -2287,6 +2572,7 @@ def main() -> int:
             install_or_update()
             prepare_game_files()
             supervisor.installed_build = installed_build_id()
+            supervisor.last_prestart_update_check_monotonic = time.monotonic()
 
         for recovered_world in recover_interrupted_restores():
             log(f"recovered interrupted world restore before server startup: {recovered_world}", source="restore")

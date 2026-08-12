@@ -1014,7 +1014,7 @@ remove_servers() {
     assert_palworld_host_project_owner
     acquire_palworld_project_operation_lock
     python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" ensure-template >/dev/null
-    local server container legacy_volume server_volume container_id="" inspect_status=0
+    local server container legacy_volume server_volume steam_volume container_id="" inspect_status=0
     local container_ids=() container_names=()
     for server in "$@"; do
         validate_server_name "$server" || { echo "오류: 잘못된 서버 이름: $server" >&2; exit 2; }
@@ -1045,8 +1045,10 @@ remove_servers() {
         fi
         legacy_volume="palworld-$server-data"
         server_volume="palworld-$server-server"
+        steam_volume="palworld-$server-steam"
         remove_docker_volume "$legacy_volume"
         remove_docker_volume "$server_volume"
+        remove_docker_volume "$steam_volume"
         container_id=""
         inspect_status=0
         container_id="$(inspect_container_id_or_missing "$container")" || inspect_status=$?
@@ -1057,7 +1059,7 @@ remove_servers() {
             return 1
         fi
         safe_remove_server_files "$server"
-        echo "$server 제거 완료: 컨테이너, config/$server.env, data/$server, backups/$server, runtime/policy/$server, 서버 파일 볼륨"
+        echo "$server 제거 완료: 컨테이너, config/$server.env, data/$server, backups/$server, runtime/policy/$server, 서버 파일·SteamCMD 상태 볼륨"
         ((index += 1))
     done
     generate_compose
@@ -1117,7 +1119,7 @@ remove_all_managed() {
         remove_servers "${SERVER_NAMES[@]}"
     fi
 
-    local path base server volume legacy_volume server_volume
+    local path base server volume legacy_volume server_volume steam_volume
     for path in "$PALWORLD_PROJECT_DIR"/config/server[0-9]*.env; do
         [[ -e "$path" ]] || continue
         base="$(basename -- "$path" .env)"
@@ -1125,8 +1127,10 @@ remove_all_managed() {
         python3 -B "$PALWORLD_INSTALL_DIR/scripts/instances.py" assert-server-ownership "$base"
         legacy_volume="palworld-$base-data"
         server_volume="palworld-$base-server"
+        steam_volume="palworld-$base-steam"
         remove_docker_volume "$legacy_volume"
         remove_docker_volume "$server_volume"
+        remove_docker_volume "$steam_volume"
         rm -f -- "$path"
     done
     for path in "$PALWORLD_PROJECT_DIR"/data/server[0-9]*; do
@@ -1158,7 +1162,7 @@ remove_all_managed() {
         return 1
     fi
     while IFS= read -r volume; do
-        [[ "$volume" =~ ^palworld-server[1-9][0-9]*-(server|data)$ ]] || continue
+        [[ "$volume" =~ ^palworld-server[1-9][0-9]*-(server|steam|data)$ ]] || continue
         remove_docker_volume "$volume"
     done <<<"$volume_output"
 

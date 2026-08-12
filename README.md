@@ -345,8 +345,10 @@ than only the user workflow.
   modifying resources owned by another project.
 - Host-wide and project-wide management locks serialize Setup, Manage, Test,
   and Remove.
-- A shared update lock keeps multiple `serverN` instances on one host from
-  running SteamCMD updates at the same time.
+- Multiple `serverN` instances briefly share the authoritative Steam BuildID
+  result, while a host-wide lock allows only one SteamCMD update at a time.
+  Per-server SteamCMD state volumes preserve update metadata across container
+  recreation.
 - Removal deletes only paths and resources that can be verified as
   project-owned. Unrelated top-level files are preserved.
 

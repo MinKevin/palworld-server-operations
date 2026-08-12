@@ -592,6 +592,18 @@ def storage_mount_errors(inspected: dict[str, object], spec: ServerSpec) -> list
     elif server_mount.get("RW") is not True:
         errors.append("서버 파일 볼륨이 읽기 전용")
 
+    steam_mount = by_destination.get("/home/palworld/.local/share/Steam")
+    expected_steam_volume = instances.steam_volume_name(spec.name)
+    if not steam_mount:
+        errors.append("SteamCMD 상태 named volume 누락")
+    elif (
+        steam_mount.get("Type") != "volume"
+        or steam_mount.get("Name") != expected_steam_volume
+    ):
+        errors.append(f"SteamCMD 상태 볼륨 불일치: {steam_mount}")
+    elif steam_mount.get("RW") is not True:
+        errors.append("SteamCMD 상태 볼륨이 읽기 전용")
+
     saved_mount = by_destination.get("/palworld/server/Pal/Saved")
     expected_saved = str(instances.saved_path(spec.name).resolve())
     if not saved_mount:

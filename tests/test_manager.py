@@ -714,7 +714,7 @@ class InstallValidationTests(unittest.TestCase):
             "run_logged_command",
             side_effect=[manager.STEAMCMD_STALLED_EXIT_CODE, 0],
         ) as run_command, mock.patch.object(manager.time, "sleep"):
-            manager.install_or_update()
+            manager.install_or_update(force_update=True)
 
         self.assertEqual(run_command.call_count, 2)
         self.assertEqual(run_command.call_args_list[0].kwargs["progress_timeout"], 120.0)
@@ -752,22 +752,76 @@ class InstallValidationTests(unittest.TestCase):
             manifest.write_text(content, encoding="utf-8")
             self.assertEqual(manager.installed_build_id(manifest), 12345678)
 
-    def test_update_check_response_reports_required_build(self) -> None:
-        up_to_date, required = manager.parse_update_check_response(
-            {
-                "response": {
-                    "success": True,
-                    "up_to_date": False,
-                    "required_version": 87654321,
-                }
-            }
+    def test_steamcmd_app_info_reports_public_build(self) -> None:
+        output = (
+            'Steam Console Client\n'
+            '"2394010"\n'
+            '{\n'
+            '  "depots"\n'
+            '  {\n'
+            '    "branches"\n'
+            '    {\n'
+            '      "public"\n'
+            '      {\n'
+            '        "buildid" "87654321"\n'
+            '      }\n'
+            '    }\n'
+            '  }\n'
+            '}\n'
         )
-        self.assertFalse(up_to_date)
-        self.assertEqual(required, 87654321)
+        self.assertEqual(manager.parse_available_build_id(output), 87654321)
 
-    def test_update_check_response_rejects_missing_status(self) -> None:
+    def test_steamcmd_app_info_rejects_missing_branch_build(self) -> None:
         with self.assertRaises(ValueError):
-            manager.parse_update_check_response({"response": {"success": True}})
+            manager.parse_available_build_id('"2394010"\n{\n"depots" { }\n}\n')
+
+    def test_update_check_compares_installed_and_available_build_ids(self) -> None:
+        with mock.patch.object(manager, "available_build_id", return_value=87654321):
+            self.assertEqual(
+                manager.check_steam_update(12345678),
+                (False, 87654321),
+            )
+            self.assertEqual(
+                manager.check_steam_update(87654321),
+                (True, 87654321),
+            )
+
+    def test_available_build_query_is_shared_through_the_host_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            manager,
+            "UPDATE_LOCK_FILE",
+            Path(directory) / "steam-update.lock",
+        ), mock.patch.object(
+            manager,
+            "query_available_build_id",
+            return_value=87654321,
+        ) as query:
+            first = manager.available_build_id(cache_seconds=60)
+            second = manager.available_build_id(cache_seconds=60)
+
+        self.assertEqual((first, second), (87654321, 87654321))
+        query.assert_called_once_with("public", timeout=manager.STEAM_APP_INFO_TIMEOUT_SECONDS)
+
+    def test_startup_metadata_failure_preserves_complete_installed_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ,
+            {"UPDATE_ON_START": "true"},
+        ), mock.patch.object(manager, "GAME_DIR", Path(directory)), mock.patch.object(
+            manager,
+            "missing_required_game_files",
+            return_value=(),
+        ), mock.patch.object(
+            manager,
+            "installed_build_id",
+            return_value=12345678,
+        ), mock.patch.object(
+            manager,
+            "check_steam_update",
+            side_effect=RuntimeError("Steam metadata unavailable"),
+        ), mock.patch.object(manager, "run_logged_command") as run_command:
+            manager.install_or_update()
+
+        run_command.assert_not_called()
 
 
 class SharedUpdateLockTests(unittest.TestCase):
@@ -819,6 +873,10 @@ class SharedUpdateLockTests(unittest.TestCase):
             {"UPDATE_ON_START": "true", "STEAMCMD_BIN": "/usr/bin/steamcmd"},
         ), mock.patch.object(manager, "GAME_DIR", Path(directory)), mock.patch.object(
             manager, "missing_required_game_files", return_value=()
+        ), mock.patch.object(
+            manager, "installed_build_id", return_value=1
+        ), mock.patch.object(
+            manager, "check_steam_update", return_value=(False, 2)
         ), mock.patch.object(
             manager,
             "shared_update_lock",
@@ -951,7 +1009,9 @@ class SharedUpdateLockTests(unittest.TestCase):
             supervisor.check_automatic_update()
 
         supervisor.perform_update.assert_called_once_with(
-            "manual update requested", waittime=0
+            "manual update requested",
+            waittime=0,
+            restart_announcement=False,
         )
 
     def test_lock_wait_status_is_json_serializable_without_exposing_internal_reason(self) -> None:
@@ -997,7 +1057,8 @@ class UpdateControlTests(unittest.TestCase):
         supervisor.desired_state = mock.Mock(return_value=(True, "manual override"))
         supervisor.start_server = mock.Mock()
 
-        self.assertTrue(supervisor.restart_server("manual restart requested"))
+        with mock.patch.dict(os.environ, {"UPDATE_ON_START": "false"}):
+            self.assertTrue(supervisor.restart_server("manual restart requested"))
         supervisor.stop_server.assert_called_once_with(
             "manual restart requested",
             waittime=60,
@@ -1006,7 +1067,58 @@ class UpdateControlTests(unittest.TestCase):
             final_message=manager.FINAL_RESTART_MESSAGE,
             require_graceful=True,
         )
-        supervisor.start_server.assert_called_once_with("manual restart requested")
+        supervisor.start_server.assert_called_once_with(
+            "manual restart requested",
+            update_before_start=False,
+        )
+
+    def test_restart_checks_steamcmd_when_update_on_start_is_enabled(self) -> None:
+        supervisor = manager.Supervisor.__new__(manager.Supervisor)
+        supervisor.restart_warning_seconds = 60
+        supervisor.update_required_before_game_start = mock.Mock(return_value=True)
+
+        with mock.patch.dict(os.environ, {"UPDATE_ON_START": "true"}):
+            self.assertTrue(supervisor.restart_server("manual restart requested"))
+
+        supervisor.update_required_before_game_start.assert_called_once_with(
+            "manual restart requested",
+            waittime=60,
+            restart_announcement=True,
+            force_refresh=True,
+        )
+
+    def test_prestart_build_mismatch_runs_update_before_game_launch(self) -> None:
+        supervisor = manager.Supervisor.__new__(manager.Supervisor)
+        supervisor.update_retry_interval = 300
+        supervisor.perform_update = mock.Mock()
+        supervisor.last_update_error = None
+        supervisor.available_build = None
+        supervisor.installed_build = None
+
+        with mock.patch.object(
+            manager,
+            "installed_build_id",
+            return_value=12345678,
+        ), mock.patch.object(
+            manager,
+            "check_steam_update",
+            return_value=(False, 87654321),
+        ):
+            required = supervisor.update_required_before_game_start(
+                "manual start requested",
+                waittime=0,
+                restart_announcement=False,
+                force_refresh=True,
+            )
+
+        self.assertTrue(required)
+        self.assertEqual(supervisor.installed_build, 12345678)
+        self.assertEqual(supervisor.available_build, 87654321)
+        supervisor.perform_update.assert_called_once_with(
+            "pre-start update detected: manual start requested",
+            waittime=0,
+            restart_announcement=False,
+        )
 
     def test_update_stop_announces_then_saves_and_shuts_down(self) -> None:
         supervisor = manager.Supervisor.__new__(manager.Supervisor)
