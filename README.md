@@ -413,6 +413,14 @@ than only the user workflow.
 
 See [.github/SECURITY.md](.github/SECURITY.md) for vulnerability reporting.
 
+## Code signing policy
+
+Official Windows releases follow the project
+[Code signing policy](.github/CODE_SIGNING_POLICY.md). The repository is being
+prepared for the SignPath Foundation open-source signing program. Until that
+integration is approved and enabled, release notes explicitly identify the
+Windows executables as unsigned and provide SHA-256 checksums for verification.
+
 ## Build and verification
 
 Building requires Python 3.12, Windows PowerShell 5.1, a .NET Framework

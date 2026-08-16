@@ -152,12 +152,15 @@ function Build-ClientEdition {
     if (-not (Test-Path -LiteralPath $outputDirectory)) {
         [void](New-Item -ItemType Directory -Path $outputDirectory -Force)
     }
-    $temporaryOutput = "$resolvedOutput.building"
     $temporaryResourceDirectory = Join-Path `
         ([IO.Path]::GetTempPath()) `
         ("palworld-windows-build-" + [Guid]::NewGuid().ToString("N"))
-    Remove-Item -LiteralPath $temporaryOutput -Force -ErrorAction SilentlyContinue
     [void](New-Item -ItemType Directory -Path $temporaryResourceDirectory)
+    # Compile under the final file name so Windows version metadata does not
+    # expose the old internal `.building` staging suffix.
+    $temporaryOutput = Join-Path `
+        $temporaryResourceDirectory `
+        ([IO.Path]::GetFileName($resolvedOutput))
     $clientResource = Join-Path $temporaryResourceDirectory "PalworldServerOperations.Client.ps1"
     $buildInputResource = Join-Path $temporaryResourceDirectory "PalworldServerOperations.BuildInputs.json"
     Copy-Utf8BomPowerShellResource -Source $clientScript -Destination $clientResource

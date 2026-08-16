@@ -6,7 +6,9 @@ using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 #if ADMIN
@@ -30,6 +32,10 @@ internal static class Program
     private const string ResourceName = "PalworldServerOperations.Client.ps1";
     private const string IconResourceName = "PalworldServerOperations.Icon.ico";
     private const string ProjectLicenseResourceName = "PalworldServerOperations.License.txt";
+    private const string ScriptPayloadMarker =
+        "# PALWORLD_EMBEDDED_SSH_MODULE_4D399A7A4A204926A629B4370D552FAC #";
+    private static readonly string ScriptPayloadSeparator =
+        "\n" + ScriptPayloadMarker + "\n";
 #if ADMIN
     private const string SshModuleResourceName = "PalworldServerOperations.SshModule.ps1";
     private const string SshRuntimeResourcePrefix = "PalworldServerOperations.SshRuntime.";
@@ -45,12 +51,8 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        string temporaryBaseName =
-            "PalworldServerOperations-" + Guid.NewGuid().ToString("N");
-        string temporaryScript = Path.Combine(
-            Path.GetTempPath(),
-            temporaryBaseName + ".ps1"
-        );
+        string clientSource = null;
+        string temporaryBaseName = "PalworldServerOperations-" + Guid.NewGuid().ToString("N");
         string temporaryIcon = Path.Combine(Path.GetTempPath(), temporaryBaseName + ".ico");
         string temporaryProjectLicense = Path.Combine(
             Path.GetTempPath(),
@@ -61,20 +63,17 @@ internal static class Program
             Path.GetTempPath(),
             "PalworldServerOperationsAdmin-" + Guid.NewGuid().ToString("N")
         );
+        string sshModuleSource = null;
 #endif
 
         try
         {
-            ExtractClient(temporaryScript);
+            clientSource = ReadEmbeddedText(ResourceName);
             ExtractResource(IconResourceName, temporaryIcon);
             ExtractResource(ProjectLicenseResourceName, temporaryProjectLicense);
 #if ADMIN
             Directory.CreateDirectory(temporarySshDirectory);
-            string temporarySshModule = Path.Combine(
-                temporarySshDirectory,
-                "palworld-ssh-management.ps1"
-            );
-            ExtractResource(SshModuleResourceName, temporarySshModule);
+            sshModuleSource = ReadEmbeddedText(SshModuleResourceName);
             ExtractResourcesWithPrefix(SshRuntimeResourcePrefix, temporarySshDirectory);
             ExtractResourcesWithPrefix(SshPayloadResourcePrefix, temporarySshDirectory);
             string temporaryThirdParty = Path.Combine(temporarySshDirectory, "THIRD_PARTY.txt");
@@ -106,12 +105,22 @@ internal static class Program
             else
             {
                 startInfo.Arguments =
-                    "-NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File "
-                    + QuoteArgument(temporaryScript);
+                    "-NoLogo -NoProfile -NonInteractive -STA -Command "
+                    + QuoteArgument(
+                        "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); "
+                        + "$payload=[Console]::In.ReadToEnd(); "
+                        + "$separator=[string][char]10+'" + ScriptPayloadMarker + "'+[char]10; "
+                        + "$separatorIndex=$payload.IndexOf($separator,[StringComparison]::Ordinal); "
+                        + "if($separatorIndex -lt 0){throw 'Embedded script payload separator is missing.'}; "
+                        + "$global:PalworldEmbeddedSshModuleSource="
+                        + "$payload.Substring($separatorIndex+$separator.Length); "
+                        + ". ([ScriptBlock]::Create($payload.Substring(0,$separatorIndex)))"
+                    );
+                startInfo.RedirectStandardInput = true;
                 if (!String.IsNullOrEmpty(launcherTestMode))
                 {
-                    startInfo.Arguments +=
-                        " -LauncherTestMode " + QuoteArgument(launcherTestMode);
+                    startInfo.RedirectStandardOutput = true;
+                    startInfo.RedirectStandardError = true;
                 }
             }
             startInfo.WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory;
@@ -126,8 +135,12 @@ internal static class Program
                 Assembly.GetExecutingAssembly().Location;
             childEnvironment["PALWORLD_CLIENT_ICON_PATH"] = temporaryIcon;
             childEnvironment["PALWORLD_PROJECT_LICENSE_PATH"] = temporaryProjectLicense;
+            if (!String.IsNullOrEmpty(launcherTestMode))
+            {
+                childEnvironment["PALWORLD_CLIENT_TEST_MODE"] = launcherTestMode;
+            }
 #if ADMIN
-            childEnvironment["PALWORLD_SSH_MODULE_PATH"] = temporarySshModule;
+            childEnvironment["PALWORLD_SSH_MODULE_STREAMED"] = "1";
             childEnvironment["PALWORLD_SSH_RUNTIME_DIR"] = temporarySshDirectory;
             childEnvironment["PALWORLD_SSH_PAYLOAD_DIR"] = temporarySshDirectory;
             childEnvironment["PALWORLD_THIRD_PARTY_PATH"] = temporaryThirdParty;
@@ -151,8 +164,33 @@ internal static class Program
                         StopUnassignedChild(process);
                         throw;
                     }
+                    Task<string> standardOutput = startInfo.RedirectStandardOutput
+                        ? process.StandardOutput.ReadToEndAsync()
+                        : null;
+                    Task<string> standardError = startInfo.RedirectStandardError
+                        ? process.StandardError.ReadToEndAsync()
+                        : null;
                     WriteLauncherJobTestChildPid(launcherTestMode, process.Id);
+                    if (launcherTestMode != "launcher-job-hold")
+                    {
+                        WriteClientSource(
+                            process,
+                            clientSource,
+#if ADMIN
+                            sshModuleSource
+#else
+                            ""
+#endif
+                        );
+                    }
                     process.WaitForExit();
+                    if (process.ExitCode != 0 && !String.IsNullOrEmpty(launcherTestMode))
+                    {
+                        string diagnostic =
+                            (standardOutput == null ? "" : standardOutput.GetAwaiter().GetResult())
+                            + (standardError == null ? "" : standardError.GetAwaiter().GetResult());
+                        WriteLauncherTestError(diagnostic);
+                    }
                     return process.ExitCode;
                 }
             }
@@ -169,20 +207,7 @@ internal static class Program
             string testMode = GetLauncherTestMode(args);
             if (!String.IsNullOrEmpty(testMode))
             {
-                string errorFile = Environment.GetEnvironmentVariable(
-                    "PALWORLD_LAUNCHER_TEST_ERROR_FILE"
-                );
-                if (!String.IsNullOrEmpty(errorFile))
-                {
-                    try
-                    {
-                        File.WriteAllText(Path.GetFullPath(errorFile), error.ToString());
-                    }
-                    catch
-                    {
-                        // The original launcher error is still represented by exit code 1.
-                    }
-                }
+                WriteLauncherTestError(error.ToString());
                 return 1;
             }
             MessageBox.Show(
@@ -195,7 +220,6 @@ internal static class Program
         }
         finally
         {
-            DeleteTemporaryFile(temporaryScript);
             DeleteTemporaryFile(temporaryIcon);
             DeleteTemporaryFile(temporaryProjectLicense);
 #if ADMIN
@@ -204,9 +228,51 @@ internal static class Program
         }
     }
 
-    private static void ExtractClient(string destination)
+    private static string ReadEmbeddedText(string resourceName)
     {
-        ExtractResource(ResourceName, destination);
+        Assembly assembly = Assembly.GetExecutingAssembly();
+        using (Stream input = assembly.GetManifestResourceStream(resourceName))
+        {
+            if (input == null)
+            {
+                throw new InvalidOperationException(
+                    "Embedded resource is missing: " + resourceName
+                );
+            }
+            using (StreamReader reader = new StreamReader(
+                input,
+                new UTF8Encoding(false, true),
+                true
+            ))
+            {
+                return reader.ReadToEnd();
+            }
+        }
+    }
+
+    private static void WriteClientSource(
+        Process process,
+        string source,
+        string sshModuleSource
+    )
+    {
+        if (source.Contains(ScriptPayloadSeparator)
+            || (!String.IsNullOrEmpty(sshModuleSource)
+                && sshModuleSource.Contains(ScriptPayloadSeparator)))
+        {
+            throw new InvalidOperationException("Embedded script payload separator is not unique.");
+        }
+        string payload = source + ScriptPayloadSeparator + (sshModuleSource ?? "");
+        byte[] content = new UTF8Encoding(false, true).GetBytes(payload);
+        try
+        {
+            process.StandardInput.BaseStream.Write(content, 0, content.Length);
+            process.StandardInput.BaseStream.Flush();
+        }
+        finally
+        {
+            process.StandardInput.Close();
+        }
     }
 
     private static void ExtractResource(string resourceName, string destination)
@@ -357,6 +423,25 @@ internal static class Program
             Path.GetFullPath(destination),
             processId.ToString(CultureInfo.InvariantCulture)
         );
+    }
+
+    private static void WriteLauncherTestError(string detail)
+    {
+        string errorFile = Environment.GetEnvironmentVariable(
+            "PALWORLD_LAUNCHER_TEST_ERROR_FILE"
+        );
+        if (String.IsNullOrEmpty(errorFile))
+        {
+            return;
+        }
+        try
+        {
+            File.WriteAllText(Path.GetFullPath(errorFile), detail ?? "");
+        }
+        catch
+        {
+            // The original launcher or child error is still represented by exit code 1.
+        }
     }
 
     private static Process StartProcessWithEnvironment(

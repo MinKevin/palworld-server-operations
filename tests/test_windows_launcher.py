@@ -135,6 +135,20 @@ class WindowsLauncherLifetimeTests(unittest.TestCase):
         self.assertIn("SetInformationJobObject", content)
         self.assertIn("AssignProcessToJobObject", content)
 
+    def test_launcher_streams_embedded_script_without_execution_policy_bypass(self) -> None:
+        content = LAUNCHER_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("ReadEmbeddedText(ResourceName)", content)
+        self.assertIn("startInfo.RedirectStandardInput = true", content)
+        self.assertIn("WriteClientSource(", content)
+        self.assertIn("ScriptPayloadSeparator", content)
+        self.assertIn(
+            ". ([ScriptBlock]::Create($payload.Substring(0,$separatorIndex)))",
+            content,
+        )
+        self.assertNotIn("ExecutionPolicy Bypass", content)
+        self.assertNotIn("temporaryScript", content)
+        self.assertNotIn("temporarySshModule", content)
+
 
 if __name__ == "__main__":
     unittest.main()

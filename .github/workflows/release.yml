@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONIOENCODING: "utf-8"
+  PYTHONUTF8: "1"
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Validate release tag and executable version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -notmatch '^v(\d+)\.(\d+)\.(\d+)$') {
+            throw "Release tags must use vMAJOR.MINOR.PATCH."
+          }
+          $expected = "$($Matches[1]).$($Matches[2]).$($Matches[3]).0"
+          $launcher = Get-Content -Raw tools/windows-client/source/PalworldServerOperationsLauncher.cs
+          if ($launcher -notmatch [regex]::Escape("AssemblyFileVersion(`"$expected`")")) {
+            throw "Tag $env:GITHUB_REF_NAME does not match executable version $expected."
+          }
+
+      - name: Run regression tests
+        shell: pwsh
+        run: python -B -m unittest discover -s tests
+
+      - name: Rebuild and verify generated payloads
+        shell: pwsh
+        run: |
+          python -B tools/build_ssh_payloads.py
+          python -B tools/build_linux_installer.py
+          git diff --exit-code -- PalworldServerInstaller.run tools/windows-ssh-manager/generated
+
+      - name: Build release executables
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $buildDirectory = Join-Path $env:RUNNER_TEMP "palworld-release-build"
+          $releaseDirectory = Join-Path $env:GITHUB_WORKSPACE "release-artifacts"
+          New-Item -ItemType Directory -Path $buildDirectory, $releaseDirectory -Force | Out-Null
+
+          $adminBuild = Join-Path $buildDirectory "Palworld Server Operations - Admin.exe"
+          $clientBuild = Join-Path $buildDirectory "Palworld Server Operations - Client.exe"
+          powershell -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File tools/windows-client/build-exe.ps1 -Edition Admin -OutputPath $adminBuild
+          powershell -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File tools/windows-client/build-exe.ps1 -Edition User -OutputPath $clientBuild
+
+          powershell -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File tools/windows-client/verify-exe-build-inputs.ps1 `
+            -Edition Admin -ExePath $adminBuild
+          powershell -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File tools/windows-client/verify-exe-build-inputs.ps1 `
+            -Edition User -ExePath $clientBuild
+
+          $adminProcess = Start-Process -FilePath $adminBuild `
+            -ArgumentList @("--test-mode", "launcher-smoke") `
+            -WindowStyle Hidden -Wait -PassThru
+          if ($adminProcess.ExitCode -ne 0) { throw "Admin launcher smoke test failed" }
+          $clientProcess = Start-Process -FilePath $clientBuild `
+            -ArgumentList @("--test-mode", "launcher-smoke") `
+            -WindowStyle Hidden -Wait -PassThru
+          if ($clientProcess.ExitCode -ne 0) { throw "Client launcher smoke test failed" }
+
+          Copy-Item -LiteralPath $adminBuild `
+            -Destination (Join-Path $releaseDirectory "Palworld.Server.Operations.-.Admin.exe")
+          Copy-Item -LiteralPath $clientBuild `
+            -Destination (Join-Path $releaseDirectory "Palworld.Server.Operations.-.Client.exe")
+          Copy-Item -LiteralPath "PalworldServerInstaller.run" -Destination $releaseDirectory
+
+          $checksumNames = @(
+            "Palworld.Server.Operations.-.Admin.exe",
+            "Palworld.Server.Operations.-.Client.exe",
+            "PalworldServerInstaller.run"
+          )
+          $checksumLines = foreach ($name in $checksumNames) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path $releaseDirectory $name) `
+              -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          [IO.File]::WriteAllText(
+            (Join-Path $releaseDirectory "SHA256SUMS.txt"),
+            (($checksumLines -join "`n") + "`n"),
+            (New-Object Text.UTF8Encoding($false))
+          )
+
+      - name: Upload unsigned release bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.ref_name }}-unsigned-release
+          path: release-artifacts/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $env:GITHUB_REF_NAME
+          $generated = gh api --method POST `
+            "repos/$env:GITHUB_REPOSITORY/releases/generate-notes" `
+            -f "tag_name=$tag" | ConvertFrom-Json
+          $policyUrl = "https://github.com/$env:GITHUB_REPOSITORY/blob/$tag/.github/CODE_SIGNING_POLICY.md"
+          $prefix = @"
+          ## Release verification
+
+          This release was built from the tagged source by GitHub Actions.
+          The Windows executables in this release are currently unsigned while
+          the project prepares its open-source signing integration. Verify the
+          files with `SHA256SUMS.txt` before running them.
+
+          [Code signing policy]($policyUrl)
+          "@
+          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          [IO.File]::WriteAllText(
+            $notesPath,
+            ($prefix.Trim() + "`n`n" + [string]$generated.body + "`n"),
+            (New-Object Text.UTF8Encoding($false))
+          )
+
+          $assets = @(
+            Get-ChildItem -LiteralPath "release-artifacts" -File |
+              Sort-Object Name |
+              ForEach-Object { $_.FullName }
+          )
+          if ($assets.Count -ne 4) {
+            throw "Expected 4 release artifacts, found $($assets.Count)."
+          }
+
+          gh release create $tag @assets `
+            --verify-tag `
+            --title ([string]$generated.name) `
+            --notes-file $notesPath
