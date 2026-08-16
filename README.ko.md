@@ -385,6 +385,14 @@ volume과 월드·백업 데이터는 서로 다른 저장소이므로 디스크
 
 취약점 제보 방법은 [.github/SECURITY.md](.github/SECURITY.md)를 참고하세요.
 
+## Code signing policy (코드 서명 정책)
+
+공식 Windows Release는 프로젝트의
+[코드 서명 정책](.github/CODE_SIGNING_POLICY.md)을 따릅니다. 현재는 SignPath
+Foundation 오픈소스 서명 프로그램을 준비하고 있습니다. 승인과 연동이 완료되기
+전까지는 Release 안내에서 Windows EXE가 미서명 상태임을 명시하고 검증용
+SHA-256 checksum을 함께 제공합니다.
+
 ## 소스 빌드와 검증
 
 Python 3.12, Windows PowerShell 5.1, .NET Framework 컴파일러와 Git Bash 또는

@@ -3193,6 +3193,172 @@ function Save-PalworldRemoteServerEnv {
     }
 }
 
+function Find-PalworldRichTextOccurrence {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Forms.RichTextBox]$Control,
+        [Parameter(Mandatory = $true)][string]$Query,
+        [switch]$Reverse
+    )
+    if (-not $Query -or -not $Control.TextLength) { return $false }
+    $comparison = [StringComparison]::CurrentCultureIgnoreCase
+    $index = -1
+    if ($Reverse) {
+        $start = [Math]::Min($Control.SelectionStart - 1, $Control.TextLength - 1)
+        if ($start -ge 0) {
+            $index = $Control.Text.LastIndexOf($Query, $start, $comparison)
+        }
+        if ($index -lt 0) {
+            $index = $Control.Text.LastIndexOf($Query, $comparison)
+        }
+    }
+    else {
+        $start = [Math]::Min(
+            $Control.SelectionStart + $Control.SelectionLength,
+            $Control.TextLength
+        )
+        $index = $Control.Text.IndexOf($Query, $start, $comparison)
+        if ($index -lt 0 -and $start -gt 0) {
+            $index = $Control.Text.IndexOf($Query, 0, $comparison)
+        }
+    }
+    if ($index -lt 0) { return $false }
+    $Control.Select($index, $Query.Length)
+    $Control.ScrollToCaret()
+    $Control.Focus()
+    return $true
+}
+
+function Show-PalworldRichTextFindDialog {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Forms.Form]$Owner,
+        [Parameter(Mandatory = $true)][System.Windows.Forms.RichTextBox]$Control
+    )
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = Get-PalworldLocalizedText "Find" "찾기"
+    $dialog.StartPosition = "CenterParent"
+    $dialog.ClientSize = New-Object System.Drawing.Size(470, 132)
+    $dialog.FormBorderStyle = "FixedDialog"
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.KeyPreview = $true
+    $dialog.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    Set-WindowIcon $dialog
+
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = Get-PalworldLocalizedText "Find text" "찾을 내용"
+    $label.Location = New-Object System.Drawing.Point(12, 14)
+    $label.AutoSize = $true
+    $dialog.Controls.Add($label)
+
+    $queryText = New-Object System.Windows.Forms.TextBox
+    $queryText.Location = New-Object System.Drawing.Point(12, 38)
+    $queryText.Size = New-Object System.Drawing.Size(446, 23)
+    $queryText.Text = [string]$Control.PalworldFindText
+    $dialog.Controls.Add($queryText)
+
+    $status = New-Object System.Windows.Forms.Label
+    $status.Location = New-Object System.Drawing.Point(12, 72)
+    $status.Size = New-Object System.Drawing.Size(180, 28)
+    $status.ForeColor = [System.Drawing.Color]::DimGray
+    $dialog.Controls.Add($status)
+
+    $previousButton = New-Object System.Windows.Forms.Button
+    $previousButton.Text = Get-PalworldLocalizedText "Previous" "이전"
+    $previousButton.Location = New-Object System.Drawing.Point(198, 70)
+    $previousButton.Size = New-Object System.Drawing.Size(82, 30)
+    $dialog.Controls.Add($previousButton)
+
+    $nextButton = New-Object System.Windows.Forms.Button
+    $nextButton.Text = Get-PalworldLocalizedText "Next" "다음"
+    $nextButton.Location = New-Object System.Drawing.Point(286, 70)
+    $nextButton.Size = New-Object System.Drawing.Size(82, 30)
+    $dialog.Controls.Add($nextButton)
+
+    $closeButton = New-Object System.Windows.Forms.Button
+    $closeButton.Text = Get-PalworldLocalizedText "Close" "닫기"
+    $closeButton.Location = New-Object System.Drawing.Point(376, 70)
+    $closeButton.Size = New-Object System.Drawing.Size(82, 30)
+    $closeButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dialog.Controls.Add($closeButton)
+
+    $findOccurrence = ${function:Find-PalworldRichTextOccurrence}
+    $find = {
+        param([bool]$Reverse)
+        $query = [string]$queryText.Text
+        if (-not $query) {
+            $status.Text = Get-PalworldLocalizedText "Enter text to find." "검색어를 입력하세요."
+            return
+        }
+        $Control.PalworldFindText = $query
+        if (& $findOccurrence -Control $Control -Query $query -Reverse:$Reverse) {
+            $status.Text = if ($Reverse) {
+                Get-PalworldLocalizedText "Previous match" "이전 결과"
+            }
+            else { Get-PalworldLocalizedText "Next match" "다음 결과" }
+            $status.ForeColor = [System.Drawing.Color]::DarkGreen
+        }
+        else {
+            $status.Text = Get-PalworldLocalizedText "No matches found." "검색 결과가 없습니다."
+            $status.ForeColor = [System.Drawing.Color]::DarkOrange
+            $queryText.Focus()
+        }
+    }.GetNewClosure()
+    $previousButton.Add_Click({ & $find $true }.GetNewClosure())
+    $nextButton.Add_Click({ & $find $false }.GetNewClosure())
+    $queryText.Add_KeyDown({
+        param($sender, $eventArgs)
+        if ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+            & $find ([bool]$eventArgs.Shift)
+            $eventArgs.SuppressKeyPress = $true
+            $eventArgs.Handled = $true
+        }
+    }.GetNewClosure())
+    $dialog.Add_KeyDown({
+        param($sender, $eventArgs)
+        if ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::F3) {
+            & $find ([bool]$eventArgs.Shift)
+            $eventArgs.SuppressKeyPress = $true
+            $eventArgs.Handled = $true
+        }
+    }.GetNewClosure())
+    $dialog.CancelButton = $closeButton
+    $dialog.Add_Shown({
+        $queryText.SelectAll()
+        $queryText.Focus()
+    }.GetNewClosure())
+    try { [void]$dialog.ShowDialog($Owner) }
+    finally { $dialog.Dispose() }
+}
+
+function Enable-PalworldRichTextSearch {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Forms.Form]$Owner,
+        [Parameter(Mandatory = $true)][System.Windows.Forms.RichTextBox]$Control
+    )
+    if ($Control.PSObject.Properties.Name -notcontains "PalworldFindText") {
+        $Control | Add-Member -MemberType NoteProperty -Name PalworldFindText -Value ""
+    }
+    $showFindDialog = ${function:Show-PalworldRichTextFindDialog}
+    $findOccurrence = ${function:Find-PalworldRichTextOccurrence}
+    $Control.Add_KeyDown({
+        param($sender, $eventArgs)
+        if ($eventArgs.Control -and $eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::F) {
+            & $showFindDialog -Owner $Owner -Control $Control
+            $eventArgs.SuppressKeyPress = $true
+            $eventArgs.Handled = $true
+            return
+        }
+        if ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::F3 -and
+            [string]$Control.PalworldFindText) {
+            [void](& $findOccurrence `
+                -Control $Control -Query ([string]$Control.PalworldFindText) `
+                -Reverse:([bool]$eventArgs.Shift))
+            $eventArgs.SuppressKeyPress = $true
+            $eventArgs.Handled = $true
+        }
+    }.GetNewClosure())
+}
+
 function Show-PalworldServerEnvEditor {
     param(
         [Parameter(Mandatory = $true)][System.Windows.Forms.Form]$Owner,
@@ -3224,6 +3390,7 @@ function Show-PalworldServerEnvEditor {
     $editor.WordWrap = $false
     $editor.Text = $Content
     $dialog.Controls.Add($editor)
+    Enable-PalworldRichTextSearch -Owner $dialog -Control $editor
     $validationLabel = New-Object System.Windows.Forms.Label
     $validationLabel.Text = Get-PalworldLocalizedText `
         "Edit the file, then select Validate or a save action." `
@@ -3297,6 +3464,17 @@ function Show-PalworldServerEnvEditor {
     }.GetNewClosure())
     $dialog.CancelButton = $cancelButton
     if ($env:PALWORLD_CLIENT_TEST_MODE -eq "ssh-dialog-events") {
+        $editor.Select(0, 0)
+        if (-not (Find-PalworldRichTextOccurrence `
+                -Control $editor -Query "REST_API_EXPOSE") -or
+            $editor.SelectedText -cne "REST_API_EXPOSE") {
+            throw "server.env editor forward search failed."
+        }
+        if (-not (Find-PalworldRichTextOccurrence `
+                -Control $editor -Query "SERVER_PORT" -Reverse) -or
+            $editor.SelectedText -cne "SERVER_PORT") {
+            throw "server.env editor reverse search and wrap failed."
+        }
         $dialog.Show()
         [System.Windows.Forms.Application]::DoEvents()
         $validateButton.PerformClick()
@@ -3364,6 +3542,7 @@ function Show-PalworldCommonSettingsEditor {
     $editor.WordWrap = $false
     $editor.Text = $Content
     $dialog.Controls.Add($editor)
+    Enable-PalworldRichTextSearch -Owner $dialog -Control $editor
 
     $validationLabel = New-Object System.Windows.Forms.Label
     $validationLabel.Text = Get-PalworldLocalizedText `

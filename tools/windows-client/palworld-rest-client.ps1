@@ -4,6 +4,9 @@ param(
     [string]$LauncherTestMode = ""
 )
 
+if (-not $LauncherTestMode) {
+    $LauncherTestMode = [string]$env:PALWORLD_CLIENT_TEST_MODE
+}
 if ($LauncherTestMode) {
     $env:PALWORLD_CLIENT_TEST_MODE = $LauncherTestMode
 }
@@ -1353,16 +1356,30 @@ function Set-ActiveAdminConnection {
 }
 
 if ($script:IsAdminEdition) {
-    $sshModulePath = if ($env:PALWORLD_SSH_MODULE_PATH) {
-        [IO.Path]::GetFullPath($env:PALWORLD_SSH_MODULE_PATH)
+    if ($env:PALWORLD_SSH_MODULE_STREAMED -eq "1") {
+        $sshModuleSource = [string]$global:PalworldEmbeddedSshModuleSource
+        if (-not $sshModuleSource) {
+            throw "Embedded SSH Management module is missing. Rebuild Palworld Server Operations - Admin.exe."
+        }
+        # The launcher streams this build-verified resource with the client.
+        # Evaluate it in the same scope so UI event closures retain access to
+        # shared localization and connection functions without writing a PS1.
+        Invoke-Expression $sshModuleSource
+        $sshModuleSource = $null
+        $global:PalworldEmbeddedSshModuleSource = $null
     }
     else {
-        [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\windows-ssh-manager\palworld-ssh-management.ps1"))
+        $sshModulePath = if ($env:PALWORLD_SSH_MODULE_PATH) {
+            [IO.Path]::GetFullPath($env:PALWORLD_SSH_MODULE_PATH)
+        }
+        else {
+            [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\windows-ssh-manager\palworld-ssh-management.ps1"))
+        }
+        if (-not (Test-Path -LiteralPath $sshModulePath -PathType Leaf)) {
+            throw "SSH Management module is missing. Rebuild Palworld Server Operations - Admin.exe."
+        }
+        . $sshModulePath
     }
-    if (-not (Test-Path -LiteralPath $sshModulePath -PathType Leaf)) {
-        throw "SSH Management module is missing. Rebuild Palworld Server Operations - Admin.exe."
-    }
-    . $sshModulePath
 }
 
 function Get-AdminConnectionStorePayload {

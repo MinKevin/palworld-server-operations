@@ -89,10 +89,28 @@ class LinuxInstallerTests(unittest.TestCase):
                 "NOTICE.md",
             },
         )
-        self.assertFalse((ROOT / "docs").exists())
-        self.assertFalse((ROOT / "for-clients").exists())
-        for name in ("CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "SECURITY.md"):
+        ignored_paths = {line.strip() for line in ignore.splitlines()}
+        self.assertIn("/docs/", ignored_paths)
+        self.assertIn("/for-clients/", ignored_paths)
+        for name in (
+            "CODE_OF_CONDUCT.md",
+            "CODE_SIGNING_POLICY.md",
+            "CONTRIBUTING.md",
+            "SECURITY.md",
+        ):
             self.assertTrue((ROOT / ".github" / name).is_file())
+        signing_policy = (ROOT / ".github" / "CODE_SIGNING_POLICY.md").read_text(
+            encoding="utf-8"
+        )
+        release_workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("## Code signing policy", content)
+        self.assertIn("## Code signing policy (코드 서명 정책)", korean_content)
+        self.assertIn("Free code signing provided by SignPath.io", signing_policy)
+        self.assertIn("certificate by SignPath Foundation", signing_policy)
+        self.assertIn("uses: actions/upload-artifact@v7", release_workflow)
+        self.assertIn("gh release create", release_workflow)
         for name in (
             "admin-server-api-en.png",
             "admin-server-api-ko.png",

@@ -257,6 +257,16 @@ class WindowsSshManagerTests(unittest.TestCase):
     def test_admin_env_editor_validates_backs_up_and_can_apply(self) -> None:
         source = SSH_SOURCE.read_text("utf-8")
         self.assertIn("function Show-PalworldServerEnvEditor", source)
+        self.assertIn("function Enable-PalworldRichTextSearch", source)
+        self.assertIn("function Show-PalworldRichTextFindDialog", source)
+        self.assertIn("function Find-PalworldRichTextOccurrence", source)
+        self.assertIn("[System.Windows.Forms.Keys]::F", source)
+        self.assertIn("[System.Windows.Forms.Keys]::F3", source)
+        self.assertIn("& $find ([bool]$eventArgs.Shift)", source)
+        self.assertGreaterEqual(
+            source.count("Enable-PalworldRichTextSearch -Owner $dialog -Control $editor"),
+            2,
+        )
         self.assertIn("function Test-PalworldServerEnvText", source)
         self.assertIn("function Save-PalworldRemoteServerEnv", source)
         self.assertIn('"SERVER_PORT"', source)

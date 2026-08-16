@@ -1,3 +1,3 @@
-ed3c6f76cf0ba068546300fa1208313bd18f188d8aaeed51f76bad4732214e93  Palworld.Server.Operations.-.Admin.exe
-0001bb933851a20023ae710a8d089736a4edb5d949d37c5cc4cedde3187008dc  Palworld.Server.Operations.-.Client.exe
+f565b6563d311055565562b391a85a203977766526a8c54b85b6c1100cba61ca  Palworld.Server.Operations.-.Admin.exe
+d81835ba25739d46088b1d054a533e7882a5a7527e0547c09a06ee8ed84fdcdb  Palworld.Server.Operations.-.Client.exe
 520a9d625198b29f6ec22a66c02d2bbcb828b4ca8378dcd457003ece393a1a6e  PalworldServerInstaller.run
